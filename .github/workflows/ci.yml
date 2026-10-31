@@ -1,0 +1,83 @@
+name: APIPaw Agent CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 完整依赖：包含托盘（pystray + Pillow）与可选推理栈
+          - name: full
+            python: "3.10"
+            deps: "fastapi uvicorn requests pystray pillow pydantic"
+          # 降级场景：故意不装 pystray / pillow，验证托盘缺失时仍可启动与心跳
+          - name: minimal
+            python: "3.10"
+            deps: "fastapi uvicorn pydantic"
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies (${{ matrix.name }})
+        run: |
+          python -m pip install --upgrade pip
+          pip install ${{ matrix.deps }}
+
+      - name: Code Compile Check
+        run: |
+          python -m compileall -q -x '(\.venv|\\build|\\dist)' .
+
+      - name: Import Self-check
+        run: |
+          python -c "import main, agent_config, yield_monitor, telemetry, tray_icon; print('Self-check passed')"
+
+      - name: Health API Verification
+        run: |
+          python .github/scripts/health_check.py
+
+      - name: Yield Monitor Smoke Test
+        run: |
+          python .github/scripts/yield_smoke_test.py
+
+  # 多 Python 版本兼容性矩阵
+  matrix-python:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.10", "3.12" ]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn pydantic
+      - name: Compile + Import Check
+        run: |
+          python -m compileall -q -x '(\.venv|\\build|\\dist)' .
+          python -c "import main, agent_config, yield_monitor, telemetry; print('ok')"

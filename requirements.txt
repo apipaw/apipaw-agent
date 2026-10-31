@@ -1,0 +1,23 @@
+# APIPaw Agent - Python dependencies
+# Python 3.10+ | Windows 10/11 / macOS / Linux
+# Install: pip install -r requirements.txt
+
+# --- Web framework -------------------------------------------------------
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+pydantic>=2.7.0,<3.0.0
+
+# --- System tray ---------------------------------------------------------
+# pystray + Pillow are optional: the agent runs headless without them.
+pystray>=0.19.5,<1.0.0
+Pillow>=10.0.0,<13.0.0
+
+# --- Optional: local inference runtime -----------------------------------
+# torch is NOT required for the idle/yield agent. Install it manually if the
+# node should run real inference instead of the built-in placeholder model.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch>=2.5.1
+
+# --- Optional: development / testing -------------------------------------
+# httpx>=0.27.0
+# pytest>=8.0.0

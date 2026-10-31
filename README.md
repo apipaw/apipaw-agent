@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 [![API](https://img.shields.io/badge/api-OpenAI%20compatible-brightgreen.svg)](https://platform.openai.com/docs/api-reference)
-[![CI](https://github.com/<org>/apipaw-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/<org>/apipaw-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/apipaw/apipaw-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/apipaw/apipaw-agent/actions/workflows/ci.yml)
 
 **语言 / Language**：[中文](#中文版--chinese) ｜ [English](#english-version)
 
@@ -59,13 +59,13 @@ APIPaw Agent 是一个**常驻本地的挂机助手客户端**：
 ### 一行命令安装（Windows / PowerShell）
 
 ```powershell
-irm https://raw.githubusercontent.com/<org>/apipaw-agent/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/apipaw/apipaw-agent/main/install.ps1 | iex
 ```
 
 ### 一行命令安装（macOS / Linux）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/apipaw-agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/apipaw/apipaw-agent/main/install.sh | bash
 ```
 
 安装完成后启动：
@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/<org>/apipaw-agent/main/install.sh 
 ### 手动安装（Windows / PowerShell）
 
 ```powershell
-git clone https://github.com/<org>/apipaw-agent.git
+git clone https://github.com/apipaw/apipaw-agent.git
 cd apipaw-agent
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 .\.venv\Scripts\python.exe main.py
@@ -94,7 +94,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ### 手动安装（macOS / Linux）
 
 ```bash
-git clone https://github.com/<org>/apipaw-agent.git
+git clone https://github.com/apipaw/apipaw-agent.git
 cd apipaw-agent
 bash install.sh
 ./.venv/bin/python main.py
@@ -464,13 +464,13 @@ are away.
 ### One-liner (Windows / PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/<org>/apipaw-agent/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/apipaw/apipaw-agent/main/install.ps1 | iex
 ```
 
 ### One-liner (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/apipaw-agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/apipaw/apipaw-agent/main/install.sh | bash
 ```
 
 Then start the agent:
@@ -483,7 +483,7 @@ Then start the agent:
 ### From source
 
 ```bash
-git clone https://github.com/<org>/apipaw-agent.git
+git clone https://github.com/apipaw/apipaw-agent.git
 cd apipaw-agent
 python -m venv .venv
 source .venv/bin/activate     # Windows: .venv\Scripts\activate

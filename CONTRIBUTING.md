@@ -11,7 +11,7 @@
 ## 1. 开发环境
 
 ```bash
-git clone https://github.com/<org>/apipaw-agent.git
+git clone https://github.com/apipaw/apipaw-agent.git
 cd apipaw-agent
 python -m venv .venv
 # Windows: .venv\Scripts\activate
@@ -119,7 +119,7 @@ CI 全绿是合并的**必要条件**。
 
 ## 4. 报告 Bug
 
-请开 [Issue](https://github.com/<org>/apipaw-agent/issues)，并附上：
+请开 [Issue](https://github.com/apipaw/apipaw-agent/issues)，并附上：
 
 | 项目 | 说明 |
 |---|---|

@@ -116,7 +116,7 @@ curl http://127.0.0.1:52415/health
 ```json
 {
   "status": "ok",
-  "agent_version": "1.0.0",
+  "agent_version": "1.0.1",
   "node_id": "node_default_001",
   "node_name": "APIPaw-Node",
   "state": "IDLE",
@@ -289,7 +289,7 @@ print(client.chat.completions.create(
   "vram_free_gb": 4.8,
   "yield_count": 3,
   "last_yield_latency_ms": 12.0,
-  "agent_version": "1.0.0",
+  "agent_version": "1.0.1",
   "platform": "Windows",
   "timestamp": 1767225600
 }
@@ -500,7 +500,7 @@ curl http://127.0.0.1:52415/health
 ```json
 {
   "status": "ok",
-  "agent_version": "1.0.0",
+  "agent_version": "1.0.1",
   "node_id": "node_default_001",
   "node_name": "APIPaw-Node",
   "state": "IDLE",

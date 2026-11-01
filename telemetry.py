@@ -37,7 +37,7 @@ from yield_monitor import NodeState, get_yield_monitor
 
 enable_utf8_output()
 
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.0.1"
 
 # nvidia-smi 查询字段：温度 / 显存已用 / 显存总量（MiB）
 _NVIDIA_SMI_FIELDS = "temperature.gpu,memory.used,memory.total"

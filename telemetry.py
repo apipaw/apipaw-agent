@@ -31,13 +31,11 @@ except ImportError as exc:  # 缺依赖时降级：心跳失败，但不拖垮�
 else:
     _REQUESTS_IMPORT_ERROR = None
 
-from agent_config import get_config
+from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
 from yield_monitor import NodeState, get_yield_monitor
 
 enable_utf8_output()
-
-AGENT_VERSION = "1.0.1"
 
 # nvidia-smi 查询字段：温度 / 显存已用 / 显存总量（MiB）
 _NVIDIA_SMI_FIELDS = "temperature.gpu,memory.used,memory.total"
@@ -65,6 +63,16 @@ def _env_flag_disabled() -> bool:
         "yes",
         "on",
     )
+
+
+def _ws_primary_active() -> bool:
+    """WebSocket 主通道是否在线（在线时心跳由 WS 承担，HTTP 只作兜底）。"""
+    try:
+        from ws_tunnel import is_ws_connected
+
+        return bool(is_ws_connected())
+    except Exception:  # noqa: BLE001 - ws_tunnel 不可用时退回 HTTP 心跳
+        return False
 
 
 def _nvidia_smi_path() -> Optional[str]:
@@ -277,7 +285,19 @@ class TelemetryReporter:
         return min(60.0, self._interval * (2 ** min(self._consecutive_failures, 4)))
 
     def _loop(self) -> None:
+        ws_primary_announced = False
         while not self._stop_event.is_set():
+            # WebSocket 是主通信通道：WS 在线时心跳由隧道上报，
+            # 这里只负责在 WS 掉线期间用 HTTP 兜底。
+            if _ws_primary_active():
+                if not ws_primary_announced:
+                    print("[telemetry] WebSocket 主通道已连接，HTTP 心跳转为兜底")
+                    ws_primary_announced = True
+                self._stop_event.wait(self._interval)
+                continue
+            if ws_primary_announced:
+                print("[telemetry] WebSocket 主通道已断开，恢复 HTTP 心跳上报")
+                ws_primary_announced = False
             ok = self.send_once()
             if ok:
                 self._consecutive_failures = 0
@@ -294,7 +314,7 @@ class TelemetryReporter:
 
     def start(self) -> None:
         """启动心跳线程。"""
-        if self._runtime_disabled or self._cfg.disable_telemetry or _env_flag_disabled():
+        if self.is_disabled():
             print("[telemetry] 遥测已关闭（disable_telemetry / APIPAW_DISABLE_TELEMETRY）")
             return
         if self._thread is not None and self._thread.is_alive():
@@ -304,6 +324,12 @@ class TelemetryReporter:
         self._thread = threading.Thread(target=self._loop, name="TelemetryThread", daemon=True)
         self._thread.start()
         print(f"[telemetry] 启动｜周期 {self._interval:.0f}s｜目标 {self._endpoint}")
+
+    def is_disabled(self) -> bool:
+        """遥测是否被关闭（配置文件 / 环境变量 / 命令行开关）。"""
+        return bool(
+            self._runtime_disabled or self._cfg.disable_telemetry or _env_flag_disabled()
+        )
 
     def disable(self) -> None:
         """运行时关闭心跳上报（不修改配置文件，进程退出后自动失效）。"""
@@ -334,6 +360,7 @@ class TelemetryReporter:
             "last_error": self._last_error,
             "last_sent_at": self._last_sent_at,
             "running": bool(self._thread and self._thread.is_alive()),
+            "channel": "websocket" if _ws_primary_active() else "http",
         }
 
 

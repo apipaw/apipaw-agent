@@ -24,7 +24,7 @@ APIPaw Agent 是一个**常驻本地的挂机助手客户端**：
 
 - 在你的电脑**空闲**时，以 OpenAI 兼容接口（`127.0.0.1:52415`）对外提供推理能力
 - 一旦检测到**键鼠等外设活动**，节点在 **50ms 内**切换为「已让退」并释放显存，绝不抢占你正在使用的前台体验
-- 每 10 秒向云端上报节点遥测（节点名、剩余显存、GPU 温度），让调度侧知道哪个节点还在线
+- 每 10 秒向云端上报节点遥测（节点名、剩余显存、GPU 温度），让调度侧知道哪个节点还在线（WebSocket 长连接主通道）
 - 系统托盘实时显示状态、显存与温度，支持一键暂停 / 恢复
 
 **设计原则**：你的电脑优先。节点只在"你不用电脑"时工作。
@@ -39,6 +39,7 @@ APIPaw Agent 是一个**常驻本地的挂机助手客户端**：
 | 🖥️ **OpenAI 规范接口** | `/v1/chat/completions`（支持 `stream`）、`/v1/models`、`/health` |
 | 📊 **托盘可视化** | 状态 / 显存占用 / 显卡温度 / 一键暂停恢复，图标颜色随状态变化 |
 | 📡 **云端心跳** | 默认 10 秒一次，失败自动退避重试，绝不影响本地服务 |
+| 🔌 **WebSocket 主通道** | 节点与云端统一走 `wss://cloud.apipaw.com/api/v1/node/stream` 长连接；云端关闭连接时**静默退避重连**，HTTP 心跳仅作兜底 |
 | 🧩 **零重依赖** | torch 是**可选**依赖：没装 PyTorch 也能启动、能心跳、能当挂机节点 |
 | 🛠️ **一键安装** | `install.ps1`（Windows）/ `install.sh`（macOS / Linux），自动建 venv、装依赖、生成配置 |
 | 🧭 **跨平台** | Windows 走 Win32 原生实现；macOS / Linux 提供等价降级，模块始终可 import |
@@ -60,6 +61,21 @@ APIPaw Agent 是一个**常驻本地的挂机助手客户端**：
 
 ```powershell
 irm https://raw.githubusercontent.com/apipaw/apipaw-agent/main/install.ps1 | iex
+```
+
+### 一键脚本（Windows）
+
+仓库根目录提供三个纯 UTF-8 的 Windows 脚本，双击即可用：
+
+| 脚本 | 作用 |
+|---|---|
+| `install.bat` | 建 `.venv` 虚拟环境 + 安装 `requirements.txt` 依赖 |
+| `start.bat` | 前台启动节点（控制台可见日志） |
+| `start_silent.vbs` | 静默后台启动（无控制台窗口），日志见任务管理器 / 托盘 |
+
+```bat
+install.bat        :: 首次：初始化环境
+start.bat          :: 启动节点
 ```
 
 ### 一行命令安装（macOS / Linux）
@@ -116,7 +132,7 @@ curl http://127.0.0.1:52415/health
 ```json
 {
   "status": "ok",
-  "agent_version": "1.0.1",
+  "agent_version": "1.0.2",
   "node_id": "node_default_001",
   "node_name": "APIPaw-Node",
   "state": "IDLE",
@@ -274,7 +290,13 @@ print(client.chat.completions.create(
 
 ## 遥测与隐私
 
-默认每 **10 秒**向 `POST https://cloud.apipaw.com/api/v1/nodes/heartbeat` 上报一次：
+节点与云端之间统一走 **WebSocket 主通道** `wss://cloud.apipaw.com/api/v1/node/stream`：
+连接建立后先发一帧注册（`INIT`），随后每 **10 秒**发一帧 `HEARTBEAT`。
+云端关闭连接时客户端**静默退避重连**（1s → 2s → 4s … 上限 60s），直到再次显示
+`[ws_tunnel] ✅ WebSocket 已连接`。
+
+HTTP 心跳 `POST https://cloud.apipaw.com/api/v1/nodes/heartbeat` 退化为**兜底通道**：
+只有在 WS 通道未连上时才会发送。载荷结构：
 
 ```json
 {
@@ -289,7 +311,7 @@ print(client.chat.completions.create(
   "vram_free_gb": 4.8,
   "yield_count": 3,
   "last_yield_latency_ms": 12.0,
-  "agent_version": "1.0.1",
+  "agent_version": "1.0.2",
   "platform": "Windows",
   "timestamp": 1767225600
 }
@@ -371,11 +393,15 @@ apipaw-agent/
 ├── console.py          # 控制台编码兜底（GBK 下 emoji 不会打断让退线程）
 ├── yield_monitor.py    # Win32 让退监视器：GetLastInputInfo + 50ms SLA
 ├── tray_icon.py        # pystray 系统托盘：状态 / 显存 / 温度 / 暂停恢复
-├── telemetry.py        # GPU 指标采集 + 10s 心跳上报
+├── telemetry.py        # GPU 指标采集 + 10s 心跳上报（WS 在线时退居兜底）
+├── ws_tunnel.py        # WebSocket 主通道：WSS 长连接 + 静默重连 + 心跳帧
 ├── PAWMODEL.md         # 社区模型元数据标准 + 15% 创作者版税绑定规范
 ├── requirements.txt    # Python 依赖
 ├── install.ps1         # Windows 一键安装
 ├── install.sh          # macOS / Linux 一键安装
+├── install.bat         # Windows 一键安装（UTF-8 批处理）
+├── start.bat           # Windows 前台启动脚本
+├── start_silent.vbs    # Windows 静默后台启动脚本
 ├── .github/
 │   ├── workflows/ci.yml        # CI：编译检查 / 依赖矩阵 / 健康检查 / 让退冒烟
 │   └── scripts/                # CI 脚本（可本地直接运行）
@@ -447,6 +473,7 @@ are away.
 | 🖥️ **OpenAI-compatible API** | `/v1/chat/completions` (with `stream`), `/v1/models`, `/health` |
 | 📊 **System tray** | Status / VRAM / temperature / pause-resume; icon colour follows state |
 | 📡 **Cloud heartbeat** | Every 10 s by default, exponential back-off on failure, never blocks local service |
+| 🔌 **WebSocket primary channel** | The node talks to the cloud over `wss://cloud.apipaw.com/api/v1/node/stream`; on a cloud-side close it **silently reconnects with back-off**, and the HTTP heartbeat is only a fallback |
 | 🧩 **Zero heavy dependencies** | `torch` is **optional** — the agent starts, reports heartbeats and serves traffic without it |
 | 🛠️ **One-line install** | `install.ps1` (Windows) / `install.sh` (macOS / Linux) |
 | 🧭 **Cross-platform** | Native Win32 implementation on Windows; graceful degradation elsewhere |
@@ -465,6 +492,21 @@ are away.
 
 ```powershell
 irm https://raw.githubusercontent.com/apipaw/apipaw-agent/main/install.ps1 | iex
+```
+
+### One-click scripts (Windows)
+
+Three UTF-8 Windows scripts live in the repository root:
+
+| Script | Purpose |
+|---|---|
+| `install.bat` | Create the `.venv` virtual environment and install `requirements.txt` |
+| `start.bat` | Run the node in the foreground (visible console logs) |
+| `start_silent.vbs` | Run the node hidden in the background (no console window) |
+
+```bat
+install.bat        :: first run: prepare the environment
+start.bat          :: start the node
 ```
 
 ### One-liner (macOS / Linux)
@@ -500,7 +542,7 @@ curl http://127.0.0.1:52415/health
 ```json
 {
   "status": "ok",
-  "agent_version": "1.0.1",
+  "agent_version": "1.0.2",
   "node_id": "node_default_001",
   "node_name": "APIPaw-Node",
   "state": "IDLE",
@@ -610,10 +652,16 @@ headless machines.
 
 ## Telemetry & privacy
 
-A heartbeat is POSTed every **10 seconds** to
-`https://cloud.apipaw.com/api/v1/nodes/heartbeat` containing node id/name,
-hardware type, wallet address, state, GPU temperature, VRAM figures and yield
-metrics.
+The node talks to the cloud over the **WebSocket primary channel**
+`wss://cloud.apipaw.com/api/v1/node/stream`: it sends an `INIT` frame on
+connect and a `HEARTBEAT` frame every **10 seconds**. When the cloud closes
+the connection the client **silently reconnects with back-off** (1 s → 2 s →
+4 s … capped at 60 s) until `[ws_tunnel] ✅ WebSocket 已连接` shows up again.
+
+The HTTP heartbeat `POST https://cloud.apipaw.com/api/v1/nodes/heartbeat` is
+now only a **fallback**: it is sent while the WebSocket channel is down. The
+payload carries node id/name, hardware type, wallet address, state, GPU
+temperature, VRAM figures and yield metrics.
 
 - **Never** uploads file contents, clipboard, keystrokes or screen content
 - Disable with `disable_telemetry: true` or `APIPAW_DISABLE_TELEMETRY=1`
@@ -650,10 +698,12 @@ apipaw-agent/
 ├── console.py          # Console encoding fallback (GBK-safe emoji printing)
 ├── yield_monitor.py    # Win32 yield monitor: GetLastInputInfo + 50 ms SLA
 ├── tray_icon.py        # pystray tray: status / VRAM / temperature / pause
-├── telemetry.py        # GPU metrics + 10 s heartbeat
+├── telemetry.py        # GPU metrics + 10 s heartbeat (fallback while WS is up)
+├── ws_tunnel.py        # WebSocket primary channel: WSS + silent reconnect
 ├── PAWMODEL.md         # Model metadata standard + 15 % royalty binding
 ├── requirements.txt
 ├── install.ps1 / install.sh
+├── install.bat / start.bat / start_silent.vbs   # Windows one-click scripts
 ├── .github/workflows/ci.yml
 └── README.md
 ```

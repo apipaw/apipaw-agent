@@ -40,10 +40,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent_config import get_config
+from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
-from telemetry import AGENT_VERSION, collect_gpu_metrics, get_reporter
+from telemetry import collect_gpu_metrics, get_reporter
 from yield_monitor import NodeState, get_yield_monitor
+from ws_tunnel import start_ws_tunnel, stop_ws_tunnel
 
 enable_utf8_output()
 
@@ -87,11 +88,23 @@ class ChatCompletionRequest(BaseModel):
 # ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动/停止后台线程（让退监视器 + 心跳上报）。"""
+    """启动/停止后台线程（让退监视器 + WebSocket 主通道 + 心跳兜底）。"""
     cfg = get_config()
     monitor = get_yield_monitor()
     monitor.start()
-    get_reporter().start()
+
+    print("=" * 50)
+    print(f"  APIPaw Agent -- DePIN 算力节点 v{AGENT_VERSION}")
+    print("=" * 50)
+
+    reporter = get_reporter()
+    if reporter.is_disabled():
+        print("[main] 遥测已关闭，不启动 WebSocket 主通道")
+    else:
+        # WebSocket 长连接是节点的主通信通道：挂机状态与心跳都由隧道承担，
+        # HTTP 心跳仅在 WS 掉线期间兜底。
+        start_ws_tunnel()
+    reporter.start()
     print(
         f"[main] APIPaw Agent {AGENT_VERSION} 已启动｜"
         f"节点 {cfg.node_name}({cfg.node_id})｜"
@@ -101,8 +114,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        stop_ws_tunnel()
         monitor.stop()
-        get_reporter().stop()
+        reporter.stop()
         stop_tray()
         print("[main] 已退出")
 

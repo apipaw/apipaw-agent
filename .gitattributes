@@ -1,0 +1,12 @@
+# 批处理 / VBS 脚本必须以 CRLF 落盘：cmd.exe 对 LF-only 的 .bat 解析会出现
+# "was unexpected at this time" 之类的诡异错误。
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+# Python / Markdown / YAML 统一走 LF（仓库内以 LF 保存，检出时按平台转换）
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf

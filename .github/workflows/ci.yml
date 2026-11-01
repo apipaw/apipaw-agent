@@ -16,11 +16,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 完整依赖：包含托盘（pystray + Pillow）与可选推理栈
+          # 完整依赖：包含托盘（pystray + Pillow）、WebSocket 主通道与可选推理栈
           - name: full
             python: "3.10"
-            deps: "fastapi uvicorn requests pystray pillow pydantic"
-          # 降级场景：故意不装 pystray / pillow，验证托盘缺失时仍可启动与心跳
+            deps: "fastapi uvicorn requests websockets pystray pillow pydantic"
+          # 降级场景：故意不装 pystray / pillow / websockets，验证依赖缺失时仍可启动与心跳
           - name: minimal
             python: "3.10"
             deps: "fastapi uvicorn pydantic"
@@ -48,7 +48,7 @@ jobs:
 
       - name: Import Self-check
         run: |
-          python -c "import main, agent_config, yield_monitor, telemetry, tray_icon; print('Self-check passed')"
+          python -c "import main, agent_config, yield_monitor, telemetry, tray_icon, ws_tunnel; print('Self-check passed')"
 
       - name: Health API Verification
         run: |

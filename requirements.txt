@@ -12,6 +12,11 @@ pydantic>=2.7.0,<3.0.0
 # HTTP clients and kills the TLS handshake (_ssl.c:983 timeout).
 requests>=2.31.0,<3.0.0
 
+# --- WebSocket 主通道 ----------------------------------------------------
+# 节点与云端网关之间统一走 WSS 长连接 (wss://cloud.apipaw.com/api/v1/node/stream)，
+# 挂机状态与心跳都由该通道承担；HTTP 心跳仅在 WS 掉线时兜底。
+websockets>=12.0,<18.0
+
 # --- System tray ---------------------------------------------------------
 # pystray + Pillow are optional: the agent runs headless without them.
 pystray>=0.19.5,<1.0.0

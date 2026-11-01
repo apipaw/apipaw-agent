@@ -36,6 +36,9 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 
 CONFIG_FILE_NAME = "agent.config.json"
 
+# 客户端版本号（与心跳上报 / 云端注册表保持一致）
+AGENT_VERSION = "1.0.2"
+
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -50,6 +53,7 @@ class AgentConfigModel(BaseModel):
     model_name: str = "apipaw-gpt2-small"
 
     # ── 节点身份 ──────────────────────────────────────────
+    agent_version: str = AGENT_VERSION
     node_id: str = "node_default_001"
     node_name: str = "APIPaw-Node"
     hardware_type: str = "desktop"  # desktop | laptop | server
@@ -82,6 +86,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "port": 52415,
     "api_base_url": "http://127.0.0.1:52415/v1",
     "model_name": "apipaw-gpt2-small",
+    "agent_version": AGENT_VERSION,
     "node_id": "node_default_001",
     "node_name": "APIPaw-Node",
     "hardware_type": "desktop",
@@ -255,6 +260,10 @@ class AgentConfig:
         return self._model.node_id
 
     @property
+    def agent_version(self) -> str:
+        return self._model.agent_version
+
+    @property
     def node_name(self) -> str:
         return self._model.node_name
 
@@ -354,6 +363,7 @@ def config_file_path() -> Path:
 
 
 __all__ = [
+    "AGENT_VERSION",
     "AgentConfig",
     "AgentConfigModel",
     "DEFAULT_CONFIG",

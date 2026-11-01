@@ -21,9 +21,15 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from typing import Any, Dict, Optional
+
+try:
+    import requests
+except ImportError as exc:  # 缺依赖时降级：心跳失败，但不拖垮节点服务
+    requests = None  # type: ignore[assignment]
+    _REQUESTS_IMPORT_ERROR = str(exc)
+else:
+    _REQUESTS_IMPORT_ERROR = None
 
 from agent_config import get_config
 from console import enable_utf8_output
@@ -36,7 +42,19 @@ AGENT_VERSION = "1.0.0"
 # nvidia-smi 查询字段：温度 / 显存已用 / 显存总量（MiB）
 _NVIDIA_SMI_FIELDS = "temperature.gpu,memory.used,memory.total"
 _NVIDIA_SMI_TIMEOUT_SEC = 3.0
-_HTTP_TIMEOUT_SEC = 5.0
+# 云端在 Cloudflare 之后，本地到 CF 链路抖动大（实测单次 GET 成功耗时 2~16s，
+# 偶发 TLS 握手超时）。心跳超时给足余量，避免"链路其实通、但被 5s 超时掐断"。
+_HTTP_CONNECT_TIMEOUT_SEC = 10.0
+_HTTP_TIMEOUT_SEC = 20.0
+# 单次上报内的 HTTP 层重试（心跳幂等，可安全重试）
+_HTTP_RETRIES = 2
+
+# Cloudflare 侧对 Python 默认客户端 UA（python-urllib / python-requests）有额外
+# 拦截风险，表现为 TLS 握手超时（_ssl.c:983/993）；上报统一伪装成浏览器 UA。
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def _env_flag_disabled() -> bool:
@@ -150,6 +168,8 @@ class TelemetryReporter:
         self._failed_count = 0
         # 运行时开关（CLI --no-telemetry）：只影响本次进程，不写回配置文件
         self._runtime_disabled = False
+        # 复用 Session：连接池 + TLS 握手复用，避免每次心跳重新握手被 WAF 掐断
+        self._session: Optional[Any] = None
 
     # ───────────────────────── 采集与组装 ─────────────────────────
 
@@ -183,42 +203,72 @@ class TelemetryReporter:
 
     # ───────────────────────── 上报 ─────────────────────────
 
+    def _get_session(self) -> Any:
+        """获取（并缓存）上报用 HTTP Session，浏览器 UA 写在 Session 默认头里。"""
+        if self._session is None:
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": _BROWSER_USER_AGENT,
+                "Accept": "application/json",
+            })
+            # 链路抖动时的兜底：连接级重试 + 退避
+            retry = requests.adapters.Retry(
+                total=_HTTP_RETRIES,
+                connect=_HTTP_RETRIES,
+                read=_HTTP_RETRIES,
+                backoff_factor=0.5,
+                status_forcelist=(429, 500, 502, 503, 504),
+            )
+            adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            self._session = session
+        return self._session
+
     def send_once(self, payload: Optional[Dict[str, Any]] = None) -> bool:
         """上报一次心跳，返回是否成功。"""
+        if requests is None:
+            self._failed_count += 1
+            self._last_error = f"requests 未安装: {_REQUESTS_IMPORT_ERROR}"
+            print(f"[telemetry] 缺少 requests 依赖，心跳不可用: {_REQUESTS_IMPORT_ERROR}")
+            return False
+
         body = payload if payload is not None else self.build_payload()
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": f"apipaw-agent/{AGENT_VERSION}",
             "X-Node-Id": str(self._cfg.node_id),
         }
         if self._cfg.node_secret:
             headers["Authorization"] = f"Bearer {self._cfg.node_secret}"
 
-        request = urllib.request.Request(
-            self._endpoint, data=data, headers=headers, method="POST"
-        )
         try:
-            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SEC) as resp:
-                ok = 200 <= resp.status < 300
-                if ok:
-                    self._consecutive_failures = 0
-                    self._sent_count += 1
-                    self._last_sent_at = time.time()
-                else:
-                    self._failed_count += 1
-                    self._last_error = f"HTTP {resp.status}"
-                return ok
-        except urllib.error.HTTPError as exc:
+            resp = self._get_session().post(
+                self._endpoint,
+                data=data,
+                headers=headers,
+                timeout=(_HTTP_CONNECT_TIMEOUT_SEC, _HTTP_TIMEOUT_SEC),
+            )
+        except requests.exceptions.RequestException as exc:
             self._failed_count += 1
-            self._last_error = f"HTTP {exc.code}"
-            print(f"[telemetry] 心跳被拒绝: HTTP {exc.code}")
+            self._last_error = str(exc)
             return False
         except Exception as exc:  # noqa: BLE001 - 网络异常必须被吞掉
             self._failed_count += 1
             self._last_error = str(exc)
             return False
+
+        ok = 200 <= resp.status_code < 300
+        if ok:
+            self._consecutive_failures = 0
+            self._sent_count += 1
+            self._last_sent_at = time.time()
+        else:
+            self._failed_count += 1
+            self._last_error = f"HTTP {resp.status_code}"
+            print(f"[telemetry] 心跳被拒绝: HTTP {resp.status_code}")
+        return ok
 
     def _backoff_seconds(self) -> float:
         """失败退避：10s → 20s → 40s … 上限 60s。"""
@@ -266,6 +316,12 @@ class TelemetryReporter:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._session is not None:
+            try:
+                self._session.close()
+            except Exception as exc:  # noqa: BLE001 - 关闭失败不影响退出
+                print(f"[telemetry] 关闭 HTTP 会话失败: {exc}")
+            self._session = None
         print("[telemetry] 心跳线程已停止")
 
     def status(self) -> Dict[str, Any]:

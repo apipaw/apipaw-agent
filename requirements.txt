@@ -7,6 +7,11 @@ fastapi>=0.115.0,<1.0.0
 uvicorn[standard]>=0.30.0,<1.0.0
 pydantic>=2.7.0,<3.0.0
 
+# --- Cloud heartbeat reporting -------------------------------------------
+# requests (not urllib): the Cloudflare WAF blocks the default UA of Python's
+# HTTP clients and kills the TLS handshake (_ssl.c:983 timeout).
+requests>=2.31.0,<3.0.0
+
 # --- System tray ---------------------------------------------------------
 # pystray + Pillow are optional: the agent runs headless without them.
 pystray>=0.19.5,<1.0.0

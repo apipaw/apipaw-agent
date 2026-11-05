@@ -81,8 +81,15 @@ def _is_closed(conn: Any) -> bool:
 def _connect_kwargs(headers: Dict[str, str]) -> Dict[str, Any]:
     """按 websockets 版本选择请求头参数名（extra_headers / additional_headers）。"""
     kwargs: Dict[str, Any] = {
+        # 每 10s 发一个 WebSocket Ping 控制帧，作用是**保持链路活跃**，
+        # 防止中间层（Cloudflare / nginx）把连接判定为空闲而掐断。
         "ping_interval": 10.0,
-        "ping_timeout": 10.0,
+        # ping_timeout=None：客户端**不因等不到 pong 而主动断链**。
+        # 跨公网 + Cloudflare 抖动时 pong 迟到是常态，一旦客户端拥有"自杀权"，
+        # 连接寿命会被打散成大量 20s 级短连接（2026-11-05 实测：真实客户端
+        # 20~190s 必断，而与服务端同版库的对照组 4.5 分钟零断连）。
+        # 死亡探测交给服务端 keepalive 与节点注册表的存活窗口。
+        "ping_timeout": None,
         "max_size": 10 * 1024 * 1024,
         # 关闭握手最多等 2s：退出时不能被慢速网络拖住
         "close_timeout": 2.0,
@@ -95,6 +102,9 @@ def _connect_kwargs(headers: Dict[str, str]) -> Dict[str, Any]:
         kwargs["additional_headers"] = headers
     else:  # websockets < 14
         kwargs["extra_headers"] = headers
+    if "open_timeout" in params:
+        # 握手超时显式收紧：Cloudflare 链路抖动时不让 connect() 长时间挂起
+        kwargs["open_timeout"] = 10.0
     return kwargs
 
 
@@ -122,9 +132,11 @@ class WebSocketTunnel:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
 
-        # 重连参数（指数退避 1s → 2s → 4s … 上限 60s）
+        # 重连参数（指数退避 1s → 2s → 4s … 上限 8s）
+        # 上限从 60s 降到 8s：节点离线 40s 以上对派单是致命的
+        #（2026-11-05 实测重连间隔曾达 43s，期间所有派单都只能回退模拟回答）
         self._base_delay = 1.0
-        self._max_delay = 60.0
+        self._max_delay = 8.0
         self._current_delay = 1.0
 
         # 心跳参数
@@ -239,9 +251,9 @@ class WebSocketTunnel:
                 self._connected = False
                 if not self._running:
                     return
-                # 云端正常关闭连接：静默重连，不打印异常堆栈
-                print("[ws_tunnel] 云端关闭连接")
-                await self._silent_backoff()
+                # 连接体正常结束（未抛异常）：链路是通的 → 立即重连，不翻倍退避
+                print(f"[ws_tunnel] 云端关闭连接 {self._describe_close(None)}（立即重连）")
+                await self._silent_backoff(keep_delay=True)
             except asyncio.CancelledError:
                 print("[ws_tunnel] 任务取消，退出连接循环")
                 return
@@ -249,13 +261,18 @@ class WebSocketTunnel:
                 print("[ws_tunnel] 收到 KeyboardInterrupt，退出连接循环")
                 self._running = False
                 return
-            except ConnectionClosed:
+            except ConnectionClosed as exc:
                 # 云端关闭连接：静默退避重连，直到再次显示 "✅ WebSocket 已连接"
                 self._connected = False
                 if not self._running:
                     return
-                print("[ws_tunnel] 云端关闭连接")
-                await self._silent_backoff()
+                clean = self._is_clean_close(exc)
+                print("[ws_tunnel] 云端关闭连接 %s%s"
+                      % (self._describe_close(exc),
+                         "（正常关闭，立即重连）" if clean else ""))
+                # 正常关闭（1000/1001）说明链路本身是通的 → 不翻倍退避；
+                # 异常关闭（如 1006 对端无感知地断开）才继续指数退避。
+                await self._silent_backoff(keep_delay=clean)
             except Exception as exc:  # noqa: BLE001 - 任何异常都必须能自愈
                 self._connected = False
                 if not self._running:
@@ -265,10 +282,38 @@ class WebSocketTunnel:
                 await asyncio.sleep(self._current_delay)
                 self._current_delay = min(self._current_delay * 2, self._max_delay)
 
-    async def _silent_backoff(self) -> None:
-        """静默退避：只等待，不打印任何错误噪音。"""
+    async def _silent_backoff(self, keep_delay: bool = False) -> None:
+        """静默退避：只等待，不打印任何错误噪音。
+
+        ``keep_delay=True`` 时保持当前退避时长不翻倍 —— 用于"连接正常关闭"场景：
+        链路本身是通的（对端或中间层主动断开），此时翻倍退避只会让节点白白离线更久，
+        直接影响云端派单命中率。
+        """
         await asyncio.sleep(self._current_delay)
-        self._current_delay = min(self._current_delay * 2, self._max_delay)
+        if not keep_delay:
+            self._current_delay = min(self._current_delay * 2, self._max_delay)
+
+    def _describe_close(self, exc: Any) -> str:
+        """把断连渲染成可观测的 close code / reason 描述。
+
+        没有异常对象时（例如连接体自然结束），从连接对象上读 ``close_code``。
+        断连码是排查"谁在掐连接"的唯一直接证据：
+        1000/1001 = 正常关闭，1006 = 对端无感知断开（网络/边缘层重置），
+        1011 = 协议内部错误（如 keepalive pong 超时）。
+        """
+        code: Any = getattr(exc, "code", None) if exc is not None else None
+        reason: Any = getattr(exc, "reason", None) if exc is not None else None
+        if code is None and self._ws is not None:
+            code = getattr(self._ws, "close_code", None)
+            reason = getattr(self._ws, "close_reason", None) or reason
+        if code is None:
+            return "code=<未知>"
+        return "code=%s reason=%r" % (code, reason or "")
+
+    @staticmethod
+    def _is_clean_close(exc: Any) -> bool:
+        """1000（正常关闭）/ 1001（离开）视为"链路正常终止"。"""
+        return getattr(exc, "code", None) in (1000, 1001)
 
     async def _send_init(self) -> None:
         """连接建立后发送注册帧（云端据此把节点写入注册表）。"""

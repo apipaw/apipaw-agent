@@ -67,6 +67,21 @@ TYPE_INFERENCE_REQUEST = "INFERENCE_REQUEST"
 TYPE_RESPONSE_CHUNK = "RESPONSE_CHUNK"
 TYPE_RESPONSE_DONE = "RESPONSE_DONE"
 TYPE_RESPONSE_ERROR = "RESPONSE_ERROR"
+# 应用层保活（DAY14，与云端网关 server.py 配套）：
+#   云端每 20s 发一帧 {"type":"PING"}，节点回 {"type":"PONG"}。
+#   用**数据帧**而不是只依赖 ASGI 控制帧：控制帧不携带应用数据，
+#   Cloudflare / 中间设备不据此判定链路活跃，容易把长连接当空闲复位（1006）。
+TYPE_PING = "PING"
+TYPE_PONG = "PONG"
+
+# 链路看门狗：若服务端已证明支持应用层保活，却长时间没有任何下行帧，
+# 说明链路已经**静默死亡**（TCP 半开，没有 RST，两端都收不到 FIN）。
+# 此时 ASGI 的 ping_timeout=None 让客户端永远察觉不到 → 节点会"活着"但实际不可用。
+# 因此客户端侧自己判定：超过该秒数没收到服务端任何帧就主动断开重连。
+# 阈值 120s：云端每 20s 一帧应用层 PING，120s = 容忍连续 6 帧丢失，
+# 跨公网抖动时不会误杀，又比操作系统 TCP 超时（Windows 可达数分钟~数小时）快得多。
+WS_WATCHDOG_TIMEOUT_SEC = 120.0
+WS_WATCHDOG_CHECK_INTERVAL_SEC = 10.0
 
 
 def _is_closed(conn: Any) -> bool:
@@ -144,6 +159,14 @@ class WebSocketTunnel:
 
         # 统计
         self._total_completed_tokens = 0
+
+        # 最近一次收到云端**任何**帧的时刻（DAY14 链路看门狗基准）
+        self._last_server_activity = 0.0
+        # 链路看门狗任务
+        self._watchdog_task: Optional[asyncio.Task] = None
+        # 是否已收到过云端的应用层 PING（= 云端确认支持应用层保活）
+        # 只有确认支持后看门狗才敢武装，避免与旧版网关搭配时误杀健康连接
+        self._server_app_ping_seen = False
 
         print(f"[ws_tunnel] 初始化完成，云端地址: {self._ws_url}")
 
@@ -239,15 +262,21 @@ class WebSocketTunnel:
                     self._ws = ws
                     self._connected = True
                     self._current_delay = self._base_delay  # 重置退避延迟
+                    self._last_server_activity = time.time()
+                    self._server_app_ping_seen = False
                     print("[ws_tunnel] ✅ WebSocket 已连接")
                     await self._send_init()
                     self._hb_task = self._loop.create_task(self._heartbeat_loop())
+                    self._watchdog_task = self._loop.create_task(self._watchdog_loop())
                     try:
                         await self._handle_messages()
                     finally:
                         if self._hb_task:
                             self._hb_task.cancel()
                             self._hb_task = None
+                        if self._watchdog_task:
+                            self._watchdog_task.cancel()
+                            self._watchdog_task = None
                 self._connected = False
                 if not self._running:
                     return
@@ -342,6 +371,39 @@ class WebSocketTunnel:
                 print(f"[ws_tunnel] 心跳发送失败: {exc}")
                 break
 
+    async def _watchdog_loop(self) -> None:
+        """链路看门狗：侦测"静默死亡"的半开连接并主动重连（DAY14）。
+
+        为什么需要它：ASGI 的 ``ping_timeout=None`` 让客户端**永远不会**因为
+        收不到 pong 而断链（这是 L3 修复刻意为之，避免跨公网抖动时自杀）。
+        但若链路在中间层被静默掐断（TCP 半开：没有 RST，两端都收不到 FIN），
+        客户端将永远以为连接还在 —— 节点看起来"在线"，实际既收不到派单也发不出心跳。
+
+        这里用**下行数据帧**作为存活证据（云端每 20s 发一帧应用层 PING）：
+        只有在确认云端支持应用层保活之后才武装，避免旧版网关下误杀。
+        """
+        try:
+            while self._running and self._ws is not None:
+                await asyncio.sleep(WS_WATCHDOG_CHECK_INTERVAL_SEC)
+                if not self._server_app_ping_seen:
+                    continue  # 云端未启用应用层保活 → 不武装
+                idle = time.time() - self._last_server_activity
+                if idle < WS_WATCHDOG_TIMEOUT_SEC:
+                    continue
+                print(
+                    f"[ws_tunnel] ⚠️ 链路看门狗触发：{idle:.0f}s 未收到云端任何帧"
+                    f"（判定为半开死链），主动断开重连"
+                )
+                try:
+                    await self._ws.close()
+                except Exception:  # noqa: BLE001 - 关闭失败也要继续走重连流程
+                    pass
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 看门狗自身异常不能拖垮主循环
+            print(f"[ws_tunnel] 链路看门狗异常: {exc}")
+
     def _build_frame(self, frame_type: str, monitor: Any) -> Dict[str, Any]:
         """组装心跳 / 注册帧。"""
         cfg = self._cfg
@@ -357,6 +419,10 @@ class WebSocketTunnel:
             "completed_tokens": self._total_completed_tokens,
             "agent_version": AGENT_VERSION,
             "timestamp": time.time(),
+            # DAY14：声明支持**应用层** PING/PONG 保活。
+            # 云端收到该标记后才启用"60s 收不到 PONG 即判死"的回收逻辑；
+            # 老版本客户端不带此字段 → 云端保持原有行为，完全向后兼容。
+            "app_ping": 1,
         }
 
     async def _handle_messages(self) -> None:
@@ -372,6 +438,8 @@ class WebSocketTunnel:
             except Exception as exc:  # noqa: BLE001
                 print(f"[ws_tunnel] 消息接收异常: {exc}")
                 return
+            # DAY14：任何下行**数据帧**都视为链路存活证据（看门狗基准）
+            self._last_server_activity = time.time()
             await self._handle_message(raw_msg)
 
     async def _handle_message(self, raw_msg: Any) -> None:
@@ -385,6 +453,13 @@ class WebSocketTunnel:
             return
 
         msg_type = msg.get("type", "")
+        if msg_type == TYPE_PING:
+            # DAY14 应用层保活：立即回 PONG，让云端确认这条链路还活着
+            self._server_app_ping_seen = True
+            await self._send_json({"type": TYPE_PONG, "ts": time.time()})
+            return
+        if msg_type == TYPE_PONG:
+            return
         if msg_type == TYPE_INFERENCE_REQUEST:
             await self._handle_inference_request(msg)
         elif msg_type:

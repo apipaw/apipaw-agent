@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 CONFIG_FILE_NAME = "agent.config.json"
 
 # 客户端版本号（与心跳上报 / 云端注册表保持一致）
-AGENT_VERSION = "1.0.2"
+AGENT_VERSION = "1.0.3"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -79,6 +79,9 @@ class AgentConfigModel(BaseModel):
 
     # ── 其它 ──────────────────────────────────────────────
     log_level: str = "INFO"
+    # 本地 HF 分词器路径（可选）：填了且装了 transformers 时，token 计数与本地
+    # 推理运行时完全一致；留空则退化为 tiktoken 或启发式计数。
+    tokenizer_path: str = ""
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -104,6 +107,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "disable_telemetry": False,
     "enable_tray": True,
     "log_level": "INFO",
+    "tokenizer_path": "",
 }
 
 
@@ -330,6 +334,10 @@ class AgentConfig:
     @property
     def log_level(self) -> str:
         return self._model.log_level
+
+    @property
+    def tokenizer_path(self) -> str:
+        return self._model.tokenizer_path
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return (

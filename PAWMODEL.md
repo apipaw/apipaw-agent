@@ -1,6 +1,6 @@
 # PAWMODEL Specification v1.0
 
-> 规范版本：`1.0.0` ｜ 客户端版本：`1.0.2` ｜ 状态：Draft for Open-Source Release ｜ 许可证：MIT
+> 规范版本：`1.0.0` ｜ 客户端版本：`1.0.3` ｜ 状态：Draft for Open-Source Release ｜ 许可证：MIT
 
 `PAWMODEL.md` 是 APIPaw 网络中开源大模型的描述规范文件。模型创作者只需在 HuggingFace
 仓库或 GitHub 中包含此文件，即可自动接入 APIPaw 网络并赚取 **15% 版税** 收益。
@@ -200,7 +200,7 @@ total_weight_gb   ≈ params_billion × bytes_per_param
 
 > 本表记录的是**模型元数据规范版本**（`pawmodel_version`）。
 > **客户端发布版本**（`agent_version`）是另一条版本线，随 `apipaw/apipaw-agent` 仓库的
-> tag 递增，当前为 `1.0.2`；两者互不绑定——客户端发版不必然改动本规范。
+> tag 递增，当前为 `1.0.3`；两者互不绑定——客户端发版不必然改动本规范。
 
 ---
 

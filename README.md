@@ -132,7 +132,7 @@ curl http://127.0.0.1:52415/health
 ```json
 {
   "status": "ok",
-  "agent_version": "1.0.2",
+  "agent_version": "1.0.3",
   "node_id": "node_default_001",
   "node_name": "APIPaw-Node",
   "state": "IDLE",
@@ -217,6 +217,15 @@ curl http://127.0.0.1:52415/v1/chat/completions \
 ```
 
 > 这是**有意为之**的行为：调度侧据此把任务转移到其它节点，而不是让本机抢占用户前台。
+
+**真实 token 用量**：
+
+响应始终带 `usage`（`prompt_tokens` / `completion_tokens` / `total_tokens`），
+流式时随**结束帧**一起下发。计数后端按优先级选择：本地 HF 分词器
+（配置 `tokenizer_path`）→ `tiktoken` → CJK 感知启发式。
+
+节点通过 WebSocket 主通道接单时，把这份真实用量随 `RESPONSE_DONE` 帧回传云端，
+云端据此**精确计费**（而不是按字符数估算）；老版本节点不上报时云端自动回退到估算。
 
 用 OpenAI SDK 调用：
 
@@ -311,7 +320,7 @@ HTTP 心跳 `POST https://cloud.apipaw.com/api/v1/nodes/heartbeat` 退化为**�
   "vram_free_gb": 4.8,
   "yield_count": 3,
   "last_yield_latency_ms": 12.0,
-  "agent_version": "1.0.2",
+  "agent_version": "1.0.3",
   "platform": "Windows",
   "timestamp": 1767225600
 }
@@ -542,7 +551,7 @@ curl http://127.0.0.1:52415/health
 ```json
 {
   "status": "ok",
-  "agent_version": "1.0.2",
+  "agent_version": "1.0.3",
   "node_id": "node_default_001",
   "node_name": "APIPaw-Node",
   "state": "IDLE",

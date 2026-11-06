@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
 from telemetry import collect_gpu_metrics, get_reporter
+from token_counter import build_usage, count_prompt_tokens, count_tokens
 from yield_monitor import NodeState, get_yield_monitor
 from ws_tunnel import start_ws_tunnel, stop_ws_tunnel
 
@@ -199,6 +200,10 @@ def create_app() -> FastAPI:
         prompt = "\n".join(m.content for m in request.messages if m.content)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
+        # prompt token 按整段 messages 统计（含每条消息的协议开销）
+        prompt_tokens = count_prompt_tokens(
+            [{"role": m.role, "content": m.content} for m in request.messages]
+        )
 
         if not request.stream:
             content = _simulate_answer(prompt, model)
@@ -214,16 +219,18 @@ def create_app() -> FastAPI:
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": _usage(prompt, content),
+                "usage": build_usage(prompt_tokens, count_tokens(content)),
             }
 
         async def event_stream() -> AsyncIterator[str]:
             """SSE 流式输出；逐段检查让退状态，用户一回来立刻中断。"""
             content = _simulate_answer(prompt, model)
             chunks = _chunk_text(content)
+            emitted = ""
             for index, piece in enumerate(chunks):
                 if not monitor.is_idle:
                     break
+                emitted += piece
                 payload = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -245,6 +252,9 @@ def create_app() -> FastAPI:
                 "created": created,
                 "model": model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                # 真实 token 用量随结束帧一起下发：云端据此做精确计费，
+                # 而不是按字符数粗估。
+                "usage": build_usage(prompt_tokens, count_tokens(emitted)),
             }
             yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
@@ -277,17 +287,6 @@ def _simulate_answer(prompt: str, model: str) -> str:
 def _chunk_text(text: str, size: int = 24) -> List[str]:
     """把文本切成 SSE 分片。"""
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
-
-
-def _usage(prompt: str, completion: str) -> Dict[str, int]:
-    """粗略 token 计数（按 4 字符 ≈ 1 token 估算）。"""
-    prompt_tokens = max(1, len(prompt) // 4)
-    completion_tokens = max(1, len(completion) // 4)
-    return {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }
 
 
 app = create_app()

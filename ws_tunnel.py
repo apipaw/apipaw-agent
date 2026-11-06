@@ -22,7 +22,7 @@ import inspect
 import json
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
@@ -420,7 +420,7 @@ class WebSocketTunnel:
         url = f"http://127.0.0.1:{self._cfg.port}/v1/chat/completions"
 
         try:
-            ok = await asyncio.to_thread(self._forward_stream, url, payload, request_id)
+            ok, usage = await asyncio.to_thread(self._forward_stream, url, payload, request_id)
         except Exception as exc:  # noqa: BLE001
             print(f"[ws_tunnel] 本地 API 转发失败: {exc}")
             await self._send_json({
@@ -434,11 +434,27 @@ class WebSocketTunnel:
         if not ok:
             return
 
-        await self._send_json({"type": TYPE_RESPONSE_DONE, "request_id": request_id})
+        done_frame: Dict[str, Any] = {"type": TYPE_RESPONSE_DONE, "request_id": request_id}
+        if usage:
+            # 把本地推理的真实 token 用量带给云端：云端据此精确计费，
+            # 而不是按字符数估算（缺 usage 时云端自动回退到估算）。
+            done_frame["usage"] = usage
+            print(
+                "[ws_tunnel] 上报真实 token 用量 request_id=%s prompt=%s completion=%s"
+                % (request_id, usage.get("prompt_tokens"), usage.get("completion_tokens"))
+            )
+        await self._send_json(done_frame)
         print(f"[ws_tunnel] 推理请求完成 request_id={request_id}")
 
-    def _forward_stream(self, url: str, payload: Dict[str, Any], request_id: str) -> bool:
-        """同步实现：把本地 SSE 响应分块回传云端（在工作线程中执行，不阻塞事件循环）。"""
+    def _forward_stream(
+        self, url: str, payload: Dict[str, Any], request_id: str
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """同步实现：把本地 SSE 响应分块回传云端（在工作线程中执行，不阻塞事件循环）。
+
+        返回 ``(是否成功, 本地上报的真实 usage)``。本地推理若带回了 usage
+        （OpenAI 规范的结束帧或任意 chunk 的 usage 字段），这里原样透传给云端。
+        """
+        usage: Optional[Dict[str, Any]] = None
         try:
             with requests.post(
                 url,
@@ -454,7 +470,7 @@ class WebSocketTunnel:
                         "status": resp.status_code,
                         "error": f"local_api_error_{resp.status_code}",
                     })
-                    return False
+                    return False, None
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data: "):
                         continue
@@ -465,6 +481,9 @@ class WebSocketTunnel:
                         chunk = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
+                    chunk_usage = chunk.get("usage")
+                    if isinstance(chunk_usage, dict) and chunk_usage:
+                        usage = chunk_usage
                     self._send_json_threadsafe({
                         "type": TYPE_RESPONSE_CHUNK,
                         "request_id": request_id,
@@ -478,7 +497,7 @@ class WebSocketTunnel:
                 "status": 504,
                 "error": "local_api_timeout",
             })
-            return False
+            return False, None
         except Exception as exc:  # noqa: BLE001
             print(f"[ws_tunnel] 本地 API 转发失败: {exc}")
             self._send_json_threadsafe({
@@ -487,8 +506,8 @@ class WebSocketTunnel:
                 "status": 500,
                 "error": f"local_api_error: {exc}",
             })
-            return False
-        return True
+            return False, None
+        return True, usage
 
     def _send_json_threadsafe(self, data: Dict[str, Any]) -> None:
         """从工作线程发送消息（投递到事件循环线程执行）。"""

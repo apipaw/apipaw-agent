@@ -74,14 +74,19 @@ TYPE_RESPONSE_ERROR = "RESPONSE_ERROR"
 TYPE_PING = "PING"
 TYPE_PONG = "PONG"
 
-# 链路看门狗：若服务端已证明支持应用层保活，却长时间没有任何下行帧，
-# 说明链路已经**静默死亡**（TCP 半开，没有 RST，两端都收不到 FIN）。
-# 此时 ASGI 的 ping_timeout=None 让客户端永远察觉不到 → 节点会"活着"但实际不可用。
-# 因此客户端侧自己判定：超过该秒数没收到服务端任何帧就主动断开重连。
-# 阈值 120s：云端每 20s 一帧应用层 PING，120s = 容忍连续 6 帧丢失，
-# 跨公网抖动时不会误杀，又比操作系统 TCP 超时（Windows 可达数分钟~数小时）快得多。
+# 链路看门狗（DAY14）：侦测"静默死亡"的半开连接并主动重连。
+# 半开（TCP 半开，没有 RST，两端都收不到 FIN）在跨公网链路上非常常见：
+# 边缘层只掐掉"源站侧"那条腿，客户端这条腿看起来一切正常，
+# 于是节点"活着"却既收不到派单、也收不到任何下行帧。
+# 两道探针互补：
+#   1) 控制层：每 10s 主动发一个 WS PING，30s 内收不到 PONG → 判定链路已死。
+#      （与"云端是否支持应用层保活"无关，老网关同样受保护）
+#   2) 应用层：确认云端支持应用层保活后，若 120s 内没有任何**下行数据帧** → 判死。
+#      云端每 20s 一帧应用层 PING，120s = 容忍连续 6 帧丢失，跨公网抖动不会误杀。
+# 阈值都比操作系统的 TCP 超时（Windows 可达数分钟~数小时）快一个数量级。
 WS_WATCHDOG_TIMEOUT_SEC = 120.0
 WS_WATCHDOG_CHECK_INTERVAL_SEC = 10.0
+WS_PONG_WATCHDOG_TIMEOUT_SEC = 30.0
 
 
 def _is_closed(conn: Any) -> bool:
@@ -378,24 +383,53 @@ class WebSocketTunnel:
         收不到 pong 而断链（这是 L3 修复刻意为之，避免跨公网抖动时自杀）。
         但若链路在中间层被静默掐断（TCP 半开：没有 RST，两端都收不到 FIN），
         客户端将永远以为连接还在 —— 节点看起来"在线"，实际既收不到派单也发不出心跳。
+        2026-11-06 线上实测过这种形态：服务端在连接建立 10s 后记录到 1006，
+        而客户端那一侧完全没收到任何 FIN/RST，此后 8 分钟都没有重连。
 
-        这里用**下行数据帧**作为存活证据（云端每 20s 发一帧应用层 PING）：
-        只有在确认云端支持应用层保活之后才武装，避免旧版网关下误杀。
+        两道互补的探针：
+          1) **控制层**：每 10s 主动发一个 WS PING，30s 内收不到 PONG → 判死。
+             与云端版本无关（老网关也会回 PONG），因此是最可靠的一道。
+          2) **应用层**：确认云端支持应用层保活后，若 120s 内没有收到任何
+             **下行数据帧** → 判死（云端每 20s 一帧应用层 PING）。
         """
         try:
             while self._running and self._ws is not None:
                 await asyncio.sleep(WS_WATCHDOG_CHECK_INTERVAL_SEC)
-                if not self._server_app_ping_seen:
-                    continue  # 云端未启用应用层保活 → 不武装
-                idle = time.time() - self._last_server_activity
-                if idle < WS_WATCHDOG_TIMEOUT_SEC:
-                    continue
-                print(
-                    f"[ws_tunnel] ⚠️ 链路看门狗触发：{idle:.0f}s 未收到云端任何帧"
-                    f"（判定为半开死链），主动断开重连"
-                )
+                ws = self._ws
+                if ws is None or _is_closed(ws):
+                    break
+
+                # ---- 探针 1：控制层 PING/PONG ----
+                # websockets 17.x 的语义：``await ws.ping()`` 返回的是一个
+                # **等待 PONG 的 future**（而不是延迟值），必须再 await 一次。
+                # 这里用 asyncio.wait_for 给它加上自己的截止时间
+                # （Agent 自身的 ping_timeout=None 永远不会超时）。
+                dead_reason = ""
                 try:
-                    await self._ws.close()
+                    pong_waiter = await ws.ping()
+                    await asyncio.wait_for(pong_waiter,
+                                           timeout=WS_PONG_WATCHDOG_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    dead_reason = (f"{WS_PONG_WATCHDOG_TIMEOUT_SEC:.0f}s 未收到服务端 PONG"
+                                   "（判定为半开死链）")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - 连接本身已死 → 交给主循环重连
+                    break
+
+                # ---- 探针 2：应用层下行数据帧静默 ----
+                if not dead_reason and self._server_app_ping_seen:
+                    idle = time.time() - self._last_server_activity
+                    if idle >= WS_WATCHDOG_TIMEOUT_SEC:
+                        dead_reason = (f"{idle:.0f}s 未收到云端任何数据帧"
+                                       "（判定为半开死链）")
+
+                if not dead_reason:
+                    continue
+
+                print(f"[ws_tunnel] ⚠️ 链路看门狗触发：{dead_reason}，主动断开重连")
+                try:
+                    await ws.close()
                 except Exception:  # noqa: BLE001 - 关闭失败也要继续走重连流程
                     pass
                 return

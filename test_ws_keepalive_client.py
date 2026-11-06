@@ -183,8 +183,10 @@ def case_watchdog():
     # 把看门狗阈值压到秒级，避免测试跑 75s+
     old_timeout = ws_tunnel.WS_WATCHDOG_TIMEOUT_SEC
     old_interval = ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC
+    old_pong_timeout = ws_tunnel.WS_PONG_WATCHDOG_TIMEOUT_SEC
     ws_tunnel.WS_WATCHDOG_TIMEOUT_SEC = 8.0
     ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC = 2.0
+    ws_tunnel.WS_PONG_WATCHDOG_TIMEOUT_SEC = 8.0
     cloud = FakeCloud(ping_mode="once", ping_interval=1.0).start(port)
     tunnel = _run_tunnel(port, "keepalive_client_2", 0)
     try:
@@ -197,6 +199,7 @@ def case_watchdog():
         cloud.stop()
         ws_tunnel.WS_WATCHDOG_TIMEOUT_SEC = old_timeout
         ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC = old_interval
+        ws_tunnel.WS_PONG_WATCHDOG_TIMEOUT_SEC = old_pong_timeout
 
 
 def case_legacy_compat():
@@ -228,10 +231,121 @@ def case_legacy_compat():
         cloud.stop()
 
 
+class BlackHoleCloud(object):
+    """半开链路模拟器：完成 WS 握手后**再也不回任何东西**。
+
+    不回 PONG、不发任何数据帧、也不发 close 帧 —— 这正是 2026-11-06 线上事故的形态：
+    中间层（Cloudflare 边缘）只掐断了"云端→客户端"那一段，客户端这一侧既收不到
+    FIN 也收不到 RST，看起来"还连着"，于是 8 分钟都没有重连。
+
+    纯标准库实现（不依赖 websockets），因为 websockets 服务端会自动回 PONG，
+    无法复现"控制层也失联"的场景。
+    """
+
+    GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+    def __init__(self):
+        self.connections = 0
+        self._sock = None
+        self._thread = None
+        self._stop = threading.Event()
+
+    def start(self, port):
+        import base64
+        import hashlib
+
+        self._sock = socket.socket()
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", port))
+        self._sock.listen(8)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def _accept_loop(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            self.connections += 1
+            threading.Thread(target=self._hold, args=(conn,), daemon=True).start()
+
+    def _hold(self, conn):
+        import base64
+        import hashlib
+
+        conn.settimeout(5.0)
+        buf = b""
+        try:
+            while b"\r\n\r\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            key = ""
+            for line in buf.split(b"\r\n"):
+                if line.lower().startswith(b"sec-websocket-key:"):
+                    key = line.split(b":", 1)[1].strip().decode("ascii")
+            accept = base64.b64encode(
+                hashlib.sha1((key + self.GUID).encode("ascii")).digest()
+            ).decode("ascii")
+            resp = ("HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    "Sec-WebSocket-Accept: %s\r\n\r\n" % accept)
+            conn.sendall(resp.encode("ascii"))
+            # 握手之后只读不写：模拟"链路静默死亡"
+            conn.settimeout(5.0)
+            while not self._stop.is_set():
+                try:
+                    if not conn.recv(4096):
+                        return
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self._sock.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def case_control_ping_watchdog():
+    """用例4：链路从一开始就完全沉默（连云端首帧应用层 PING 都没收到）
+    → 控制层 PING 探针必须**独立**判死并触发重连。"""
+    port = _free_port()
+    old_pong_timeout = ws_tunnel.WS_PONG_WATCHDOG_TIMEOUT_SEC
+    old_interval = ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC
+    ws_tunnel.WS_PONG_WATCHDOG_TIMEOUT_SEC = 8.0
+    ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC = 2.0
+    cloud = BlackHoleCloud().start(port)
+    tunnel = _run_tunnel(port, "keepalive_client_4", 0)
+    try:
+        time.sleep(25.0)
+        ok = cloud.connections >= 2
+        detail = ("黑洞服务端统计到 %d 次连接（首连 + 看门狗重连）" % cloud.connections)
+        _record("用例4 控制层失联时客户端独立判死并重连（半开链路复现）", ok, detail)
+    finally:
+        tunnel.stop()
+        cloud.stop()
+        ws_tunnel.WS_PONG_WATCHDOG_TIMEOUT_SEC = old_pong_timeout
+        ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC = old_interval
+
+
 def main():
     case_pong_reply()
     case_watchdog()
     case_legacy_compat()
+    case_control_ping_watchdog()
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     total = len(RESULTS)
     print("\n===== 客户端应用层保活回归: %d/%d 通过 =====" % (passed, total))

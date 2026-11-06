@@ -341,11 +341,76 @@ def case_control_ping_watchdog():
         ws_tunnel.WS_WATCHDOG_CHECK_INTERVAL_SEC = old_interval
 
 
+class ResettingServer(object):
+    """接受 TCP 连接后立刻发 RST（SO_LINGER=0），让 WS 握手必然失败。
+
+    用来模拟 Cloudflare 边缘层"连上就拒"的瞬时拒绝：
+    客户端必须**快速连续重试**，而不是指数退避（DAY14 实测一次离线空窗里
+    CF 会连续拒 3~4 次握手，旧策略 1→2→4→8 翻倍把空窗拉长到 50s）。
+    """
+
+    def __init__(self):
+        self.accepts = 0
+        self._sock = None
+        self._thread = None
+        self._stop = threading.Event()
+
+    def start(self, port):
+        self._sock = socket.socket()
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", port))
+        self._sock.listen(16)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def _accept_loop(self):
+        import struct
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            self.accepts += 1
+            try:
+                # SO_LINGER(l_onoff=1, l_linger=0) → close() 直接发 RST
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                struct.pack("ii", 1, 0))
+                conn.close()
+            except OSError:
+                pass
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self._sock.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def case_fast_handshake_retry():
+    """用例5：握手连续被拒时必须**快速重试**（不指数退避），缩短节点离线空窗。"""
+    port = _free_port()
+    server = ResettingServer().start(port)
+    tunnel = _run_tunnel(port, "keepalive_client_5", 0)
+    try:
+        time.sleep(12.0)
+        # 旧策略（1→2→4→8 翻倍）：12s 内只有 4 次尝试
+        # 新策略（握手失败不翻倍）：12s 内 ≥ 8 次尝试
+        ok = server.accepts >= 8
+        detail = "12s 内握手尝试 %d 次（门槛 ≥8 次）" % server.accepts
+        _record("用例5 握手连续失败时快速重试（不指数退避）", ok, detail)
+    finally:
+        tunnel.stop()
+        server.stop()
+
+
 def main():
     case_pong_reply()
     case_watchdog()
     case_legacy_compat()
     case_control_ping_watchdog()
+    case_fast_handshake_retry()
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     total = len(RESULTS)
     print("\n===== 客户端应用层保活回归: %d/%d 通过 =====" % (passed, total))

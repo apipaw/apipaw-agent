@@ -258,12 +258,26 @@ class WebSocketTunnel:
         - 云端主动关闭 → 打印 "云端关闭连接" 后**静默退避重连**
         - 其它异常 → 打印原因后退避重连
         - 连接成功后重置退避延迟，并启动心跳协程
+
+        DAY14：区分两类失败，决定退避策略
+        ------------------------------------------------------
+        1) **握手前失败**（TCP 连不上 / 握手超时 / 被边缘层拒绝）：
+           这是 Cloudflare 边缘的瞬时拒绝，**与链路拥塞无关**。
+           2026-11-06 实测：一次节点离线空窗里 CF 连续拒了 3~4 次握手，
+           而旧策略把退避 1→2→4→8 翻倍，等于"越失败越等越久"，
+           50s 的空窗里只挤进 4 次尝试。现在握手失败**不翻倍**，
+           保持 1s 起步连续重试，同等时间可尝试 10 次以上。
+        2) **连上之后掉线**（1006 / 看门狗判死）：
+           这才是链路真的有问题，继续指数退避（上限 8s），
+           避免在链路拥塞时把源站打爆。
         """
         while self._running:
+            established = False
             try:
                 print(f"[ws_tunnel] 正在连接云端: {self._ws_url}")
                 kwargs = _connect_kwargs(self._build_auth_headers())
                 async with websockets.connect(self._ws_url, **kwargs) as ws:
+                    established = True
                     self._ws = ws
                     self._connected = True
                     self._current_delay = self._base_delay  # 重置退避延迟
@@ -312,9 +326,18 @@ class WebSocketTunnel:
                 if not self._running:
                     print("[ws_tunnel] 已停止，不再重连")
                     return
-                print(f"[ws_tunnel] 连接异常: {exc}，{self._current_delay:.1f}s 后重连...")
+                # 握手前失败（边缘层拒绝/握手超时）**不翻倍退避**：
+                # 连续快速重试能在同样的空窗里挤出更多次尝试（DAY14 实测 CF 会连续拒 3~4 次）。
+                phase = "握手阶段" if not established else "连接阶段"
+                print(f"[ws_tunnel] 连接异常（{phase}）: {exc}，"
+                      f"{self._current_delay:.1f}s 后重连...")
                 await asyncio.sleep(self._current_delay)
-                self._current_delay = min(self._current_delay * 2, self._max_delay)
+                if established:
+                    # 连上之后掉线 = 链路真有问题 → 继续指数退避
+                    self._current_delay = min(self._current_delay * 2, self._max_delay)
+                else:
+                    # 握手阶段失败 = 边缘层瞬时拒绝 → 退避保持在起步值
+                    self._current_delay = self._base_delay
 
     async def _silent_backoff(self, keep_delay: bool = False) -> None:
         """静默退避：只等待，不打印任何错误噪音。

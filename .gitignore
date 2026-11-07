@@ -23,6 +23,9 @@ agent.config.json.tmp
 *.log
 logs/
 
+# Release build artifacts (see scripts/package_release.py)
+dist/
+
 # OS
 .DS_Store
 Thumbs.db

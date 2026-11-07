@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import zipfile
@@ -93,23 +94,33 @@ QUICKSTART_TEMPLATE = REPO_ROOT / "docs" / "quickstart.md"
 # 包内用户说明的文件名
 QUICKSTART_NAME = "使用说明.md"
 
+# 发行包文件名规则
+ZIP_NAME_PREFIX = "APIPaw-Agent-"
+ZIP_NAME_SUFFIX = "-Windows.zip"
 
-def build_quickstart(version: str, zip_name: str) -> str:
+
+def build_zip_name(version: str) -> str:
+    """按版本号生成发行包文件名。"""
+    return f"{ZIP_NAME_PREFIX}v{version}{ZIP_NAME_SUFFIX}"
+
+
+def render_quickstart(version: str) -> str:
     """
-    生成包内的《使用说明.md》。
+    渲染双语指南模板（**全端唯一真源**）。
 
-    内容来自 ``docs/quickstart.md`` 这份**单一真源**——它同时是
-    README 与 GitHub Release 正文的来源。改文案只改这一个文件，
-    打包脚本负责做版本号与压缩包名的占位符替换，避免三处文案漂移。
+    内容来自 ``docs/quickstart.md``——它同时是 README 标记区、发行包内
+    《使用说明.md》、GitHub Release 正文的来源。改文案只改这一个文件，
+    其余各端由 ``scripts/sync_docs.py`` 统一分发，杜绝多处手写漂移。
     """
     if not QUICKSTART_TEMPLATE.is_file():
         raise SystemExit(f"[FATAL] 找不到说明模板：{QUICKSTART_TEMPLATE}")
 
     text = QUICKSTART_TEMPLATE.read_text(encoding="utf-8")
     text = text.replace("{{VERSION}}", version)
-    text = text.replace("{{ZIP_NAME}}", zip_name)
-    if "{{" in text or "}}" in text:
-        raise SystemExit("[FATAL] 说明模板仍有未替换的占位符")
+    text = text.replace("{{ZIP_NAME}}", build_zip_name(version))
+    leftover = re.findall(r"\{\{[A-Z_]+\}\}", text)
+    if leftover:
+        raise SystemExit(f"[FATAL] 说明模板仍有未替换的占位符：{sorted(set(leftover))}")
     return text
 
 
@@ -202,7 +213,7 @@ def verify_no_secrets(files: Dict[str, Path]) -> None:
 def build_zip(version: str, out_dir: Path) -> Path:
     """构建发行 zip，返回产物路径。"""
     out_dir.mkdir(parents=True, exist_ok=True)
-    zip_name = f"APIPaw-Agent-v{version}-Windows.zip"
+    zip_name = build_zip_name(version)
     zip_path = out_dir / zip_name
     prefix = f"APIPaw-Agent-v{version}"
 
@@ -221,7 +232,7 @@ def build_zip(version: str, out_dir: Path) -> Path:
             zf.writestr(f"{prefix}/{rel}", data)
             print(f"  + {rel}  ({len(data)} bytes)")
 
-        quickstart = build_quickstart(version, zip_name).encode("utf-8")
+        quickstart = render_quickstart(version).encode("utf-8")
         zf.writestr(f"{prefix}/{QUICKSTART_NAME}", quickstart)
         print(f"  + {QUICKSTART_NAME}  ({len(quickstart)} bytes)")
 

@@ -36,6 +36,7 @@ APIPaw Agent 是一个**常驻本地的挂机助手客户端**：
 | 特性 | 说明 |
 |---|---|
 | 🚀 **50ms 极速让退** | `GetLastInputInfo` + `timeBeginPeriod(1)` 提升计时器精度到 1ms，5ms 轮询；**先切状态、后释放显存**，`empty_cache()` 不再击穿 SLA |
+| 🎨 **可视化 Web 控制台** | 启动后浏览器自动弹出绑定面板（`/ui`），填入 Node ID / Secret 即可绑定；**换密钥无需重启**，底层 0.1s 内自动重连 |
 | 🖥️ **OpenAI 规范接口** | `/v1/chat/completions`（支持 `stream`）、`/v1/models`、`/health` |
 | 📊 **托盘可视化** | 状态 / 显存占用 / 显卡温度 / 一键暂停恢复，图标颜色随状态变化 |
 | 📡 **云端心跳** | 默认 10 秒一次，失败自动退避重试，绝不影响本地服务 |
@@ -56,6 +57,16 @@ APIPaw Agent 是一个**常驻本地的挂机助手客户端**：
 ---
 
 ## 快速开始
+
+### 🆕 傻瓜式安装指南（Windows，推荐新手使用）
+
+从 [Releases 页面](https://github.com/apipaw/apipaw-agent/releases) 下载 `APIPaw-Agent-v1.0.4-Windows.zip` 并解压到任意文件夹，然后：
+
+1. 双击运行 `install.bat`，等待环境自动初始化完成
+2. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板
+3. 填入系统分配给您的 `Node ID` 和 `Node Secret`，点击绑定即可亮起绿灯连接云端
+
+> 换密钥不需要重启程序——在面板里点一次绑定，底层会自动重连（约 0.1s）。
 
 ### 一行命令安装（Windows / PowerShell）
 
@@ -431,6 +442,8 @@ apipaw-agent/
 ├── tray_icon.py        # pystray 系统托盘：状态 / 显存 / 温度 / 暂停恢复
 ├── telemetry.py        # GPU 指标采集 + 10s 心跳上报（WS 在线时退居兜底）
 ├── ws_tunnel.py        # WebSocket 主通道：WSS 长连接 + 静默重连 + 心跳帧
+├── web_ui.py           # 本地可视化配置面板（单文件 HTML，零外部依赖）
+├── token_counter.py    # 真实 token 用量统计（随 RESPONSE_DONE 帧上报）
 ├── PAWMODEL.md         # 社区模型元数据标准 + 15% 创作者版税绑定规范
 ├── requirements.txt    # Python 依赖
 ├── install.ps1         # Windows 一键安装
@@ -438,6 +451,10 @@ apipaw-agent/
 ├── install.bat         # Windows 一键安装（UTF-8 批处理）
 ├── start.bat           # Windows 前台启动脚本
 ├── start_silent.vbs    # Windows 静默后台启动脚本
+├── docs/
+│   └── quickstart.md   # 中英双语使用指南（README / Release / 发行包同源）
+├── scripts/
+│   └── package_release.py  # 构建 Windows 发行包 zip
 ├── .github/
 │   ├── workflows/ci.yml        # CI：编译检查 / 依赖矩阵 / 健康检查 / 让退冒烟
 │   └── scripts/                # CI 脚本（可本地直接运行）
@@ -506,6 +523,7 @@ are away.
 | Feature | Details |
 |---|---|
 | 🚀 **50 ms yield** | `GetLastInputInfo` + `timeBeginPeriod(1)` (1 ms timer resolution), 5 ms polling; **state flips before memory release** so `empty_cache()` never breaches the SLA |
+| 🎨 **Local Web UI console** | A binding panel (`/ui`) opens in your browser on startup; enter Node ID / Secret and you are bound — **rotating the credential needs no restart**, the tunnel reconnects in ~0.1 s |
 | 🖥️ **OpenAI-compatible API** | `/v1/chat/completions` (with `stream`), `/v1/models`, `/health` |
 | 📊 **System tray** | Status / VRAM / temperature / pause-resume; icon colour follows state |
 | 📡 **Cloud heartbeat** | Every 10 s by default, exponential back-off on failure, never blocks local service |
@@ -523,6 +541,16 @@ are away.
 - NVIDIA GPU optional (metrics report `null` when absent; the agent still runs)
 
 ## Quick start
+
+### 🆕 Beginner-friendly install (Windows, recommended)
+
+Download `APIPaw-Agent-v1.0.4-Windows.zip` from the [Releases page](https://github.com/apipaw/apipaw-agent/releases) and extract it to any folder, then:
+
+1. Double-click `install.bat` and wait for the environment to be initialized
+2. Double-click `start.bat` to run the node — a Web UI pops up in your browser automatically
+3. Enter your `Node ID` and `Node Secret`, click bind, and the node connects to the cloud
+
+> Rotating your credential needs no restart — click bind in the panel and the tunnel reconnects (~0.1 s).
 
 ### One-liner (Windows / PowerShell)
 
@@ -758,10 +786,14 @@ apipaw-agent/
 ├── tray_icon.py        # pystray tray: status / VRAM / temperature / pause
 ├── telemetry.py        # GPU metrics + 10 s heartbeat (fallback while WS is up)
 ├── ws_tunnel.py        # WebSocket primary channel: WSS + silent reconnect
+├── web_ui.py           # Local Web UI console (single-file HTML, zero deps)
+├── token_counter.py    # Real token accounting (shipped with RESPONSE_DONE)
 ├── PAWMODEL.md         # Model metadata standard + 15 % royalty binding
 ├── requirements.txt
 ├── install.ps1 / install.sh
 ├── install.bat / start.bat / start_silent.vbs   # Windows one-click scripts
+├── docs/quickstart.md  # Bilingual guide (shared by README / Release / zip)
+├── scripts/package_release.py  # Builds the Windows release zip
 ├── .github/workflows/ci.yml
 └── README.md
 ```

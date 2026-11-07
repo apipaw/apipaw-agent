@@ -87,60 +87,30 @@ CRLF_FILES: Tuple[str, ...] = (
     "start_silent.vbs",
 )
 
-# 包内用户说明（由本脚本生成，不从仓库取）
+# 包内用户说明的模板来源（单一真源，与 README / Release 正文同源）
+QUICKSTART_TEMPLATE = REPO_ROOT / "docs" / "quickstart.md"
+
+# 包内用户说明的文件名
 QUICKSTART_NAME = "使用说明.md"
 
 
-def build_quickstart(version: str) -> str:
-    """生成包内的极简使用说明（面向完全不懂技术的新用户）。"""
-    return f"""# APIPaw Agent v{version} —— 极简使用说明
+def build_quickstart(version: str, zip_name: str) -> str:
+    """
+    生成包内的《使用说明.md》。
 
-## 一、准备
+    内容来自 ``docs/quickstart.md`` 这份**单一真源**——它同时是
+    README 与 GitHub Release 正文的来源。改文案只改这一个文件，
+    打包脚本负责做版本号与压缩包名的占位符替换，避免三处文案漂移。
+    """
+    if not QUICKSTART_TEMPLATE.is_file():
+        raise SystemExit(f"[FATAL] 找不到说明模板：{QUICKSTART_TEMPLATE}")
 
-1. 从 Release 页面下载 `APIPaw-Agent-v{version}-Windows.zip`，解压到任意目录（路径尽量不要有中文和空格）。
-2. 确认电脑已安装 **Python 3.10 或更高版本**（去 python.org 下载，安装时务必勾选 `Add Python to PATH`）。
-
-## 二、安装依赖（只需做一次）
-
-在解压出来的目录里，**双击 `install.bat`**。
-
-它会自动创建独立的虚拟环境 `.venv` 并装好所有依赖。首次运行需要联网，可能要几分钟。
-
-## 三、启动
-
-- 想看实时日志：**双击 `start.bat`**
-- 想安静挂机（推荐长期挂机用）：**双击 `start_silent.vbs`**，无黑窗口弹出
-
-## 四、绑定节点
-
-首次启动后，浏览器会自动打开一个绑定面板：
-
-1. 在云端控制台的「节点管理」页拿到您的 `Node ID` 和 `Node Secret`
-2. 把这两个值粘贴进面板对应的输入框
-3. 点击「绑 定 节 点」
-
-面板右下角显示 **云端连接：已连接**、且版本号为 v{version}，就说明绑定成功了。
-
-> 换密钥不需要重启程序——面板点一次绑定，底层会自动重连。
-
-## 五、让它一直跑
-
-挂机节点要 24 小时在线。把 `start_silent.vbs` 做成开机自启即可：
-按 `Win + R` → 输入 `shell:startup` 回车 → 把 `start_silent.vbs` 的快捷方式拖进去。
-
-## 常见问题
-
-| 现象 | 原因与处理 |
-|---|---|
-| 双击 `install.bat` 闪退 | 没装 Python，或没勾 `Add Python to PATH`；重装 Python 时补勾 |
-| 浏览器没自动弹出面板 | 手动打开 `http://127.0.0.1:52415/ui` |
-| 面板一直显示「未连接」 | 检查 Node ID / Node Secret 是否填错（区分大小写、不要有空格） |
-| 提示节点不可用 | 节点已被云端吊销凭证，请到控制台重新签发 |
-
-## 许可证
-
-MIT License，详见随包附带的 `LICENSE`。
-"""
+    text = QUICKSTART_TEMPLATE.read_text(encoding="utf-8")
+    text = text.replace("{{VERSION}}", version)
+    text = text.replace("{{ZIP_NAME}}", zip_name)
+    if "{{" in text or "}}" in text:
+        raise SystemExit("[FATAL] 说明模板仍有未替换的占位符")
+    return text
 
 
 def _read_bytes(path: Path) -> bytes:
@@ -251,7 +221,7 @@ def build_zip(version: str, out_dir: Path) -> Path:
             zf.writestr(f"{prefix}/{rel}", data)
             print(f"  + {rel}  ({len(data)} bytes)")
 
-        quickstart = build_quickstart(version).encode("utf-8")
+        quickstart = build_quickstart(version, zip_name).encode("utf-8")
         zf.writestr(f"{prefix}/{QUICKSTART_NAME}", quickstart)
         print(f"  + {QUICKSTART_NAME}  ({len(quickstart)} bytes)")
 
@@ -292,6 +262,15 @@ def smoke_test(zip_path: Path, version: str) -> None:
                 raise SystemExit(f"[FATAL] 发行包缺少必需文件：{name}")
         if not (root / QUICKSTART_NAME).is_file():
             raise SystemExit(f"[FATAL] 发行包缺少 {QUICKSTART_NAME}")
+
+        # 说明文档必须是最新双语版，且占位符已全部替换
+        guide = (root / QUICKSTART_NAME).read_text(encoding="utf-8")
+        for marker in ("Quick Start | 傻瓜式安装指南", "install.bat", "start.bat"):
+            if marker not in guide:
+                raise SystemExit(f"[FATAL] {QUICKSTART_NAME} 内容陈旧，缺少「{marker}」")
+        for stale in ("{{VERSION}}", "{{ZIP_NAME}}"):
+            if stale in guide:
+                raise SystemExit(f"[FATAL] {QUICKSTART_NAME} 仍有未替换的占位符 {stale}")
 
         for name in CRLF_FILES:
             blob = (root / name).read_bytes()

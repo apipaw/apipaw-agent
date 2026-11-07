@@ -17,6 +17,8 @@ web_ui.py — 本地配置面板（单文件 HTML）
 
 from __future__ import annotations
 
+from agent_config import AGENT_VERSION
+
 UI_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -304,7 +306,7 @@ UI_HTML = r"""<!DOCTYPE html>
 
       <div class="meta">
         <span><span class="dot" id="dot"></span><span id="connText">云端连接：检测中</span></span>
-        <span id="ver">Agent v1.0.2</span>
+        <span id="ver">Agent v__AGENT_VERSION__</span>
       </div>
 
       <div class="hint">
@@ -389,5 +391,8 @@ UI_HTML = r"""<!DOCTYPE html>
 </body>
 </html>
 """
+
+# 版本号由 agent_config 单点维护，避免面板显示与 /health 上报不一致
+UI_HTML = UI_HTML.replace("__AGENT_VERSION__", AGENT_VERSION)
 
 __all__ = ["UI_HTML"]

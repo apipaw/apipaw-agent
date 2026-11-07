@@ -9,6 +9,9 @@ main.py — APIPaw Agent 本地服务入口
 ``/health``                              GET     节点健康检查与实时指标
 ``/v1/models``                           GET     模型列表
 ``/v1/chat/completions``                 POST    对话补全（支持 stream）
+``/ui``                                  GET     本地可视化配置面板（单文件 HTML）
+``/api/status``                          GET     面板状态查询（不含明文密钥）
+``/api/bind``                            POST    绑定 Node ID / Secret 并热重连
 ======================================  ======  ====================================
 
 让退语义
@@ -28,24 +31,32 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import platform
 import sys
 import threading
 import time
 import uuid
+import webbrowser
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
 from telemetry import collect_gpu_metrics, get_reporter
 from token_counter import build_usage, count_prompt_tokens, count_tokens
+from web_ui import UI_HTML
 from yield_monitor import NodeState, get_yield_monitor
-from ws_tunnel import start_ws_tunnel, stop_ws_tunnel
+from ws_tunnel import (
+    is_ws_connected,
+    reload_tunnel_credentials,
+    start_ws_tunnel,
+    stop_ws_tunnel,
+)
 
 enable_utf8_output()
 
@@ -84,6 +95,13 @@ class ChatCompletionRequest(BaseModel):
     user: Optional[str] = None
 
 
+class BindRequest(BaseModel):
+    """本地配置面板的绑定请求（Node ID + Node Secret）。"""
+
+    node_id: str = Field(default="", max_length=128)
+    node_secret: str = Field(default="", max_length=512)
+
+
 # ──────────────────────────────────────────────────────────────
 # 应用装配
 # ──────────────────────────────────────────────────────────────
@@ -112,6 +130,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         f"监听 http://{cfg.host}:{cfg.port}｜"
         f"平台 {platform.system()}"
     )
+    # Windows：启动后自动打开本地配置面板（小白用户零配置入口）
+    if platform.system() == "Windows":
+        threading.Timer(1.5, _open_ui_browser, args=(cfg.host, cfg.port)).start()
     try:
         yield
     finally:
@@ -265,7 +286,104 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    # ── /ui ── 本地可视化配置面板（单文件 HTML，零外部依赖）──
+    @app.get("/ui", response_class=HTMLResponse)
+    async def ui() -> HTMLResponse:
+        """返回本地配置面板页面。"""
+        return HTMLResponse(content=UI_HTML)
+
+    # ── /api/status ── 面板状态查询（不回传明文密钥）──
+    @app.get("/api/status")
+    async def api_status() -> Dict[str, Any]:
+        """当前绑定状态与云端连接情况，供面板预填与状态灯使用。"""
+        monitor = get_yield_monitor()
+        return {
+            "ok": True,
+            "node_id": cfg.node_id,
+            "node_name": cfg.node_name,
+            "has_secret": bool(cfg.node_secret),
+            "ws_connected": is_ws_connected(),
+            "state": monitor.state.name,
+            "agent_version": AGENT_VERSION,
+            "timestamp": int(time.time()),
+        }
+
+    # ── /api/bind ── 绑定凭证：写盘 + 刷新内存 + 隧道平滑重连 ──
+    @app.post("/api/bind")
+    async def api_bind(req: BindRequest) -> JSONResponse:
+        """
+        保存 Node ID / Node Secret 并让节点立刻用新凭证连接云端。
+
+        严格按顺序执行：
+        1. 校验入参（非空）
+        2. 覆写本地 ``agent.config.json`` 的鉴权字段（``AgentConfig.update``
+           内部为「原子写盘 + 刷新内存模型」）
+        3. 触发 ws_tunnel 平滑重连（断开无效连接 + 唤醒退避 + 重新握手）
+        """
+        node_id = (req.node_id or "").strip()
+        node_secret = (req.node_secret or "").strip()
+
+        # ① 校验
+        if not node_id:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "message": "Node ID 不能为空"},
+            )
+        if not node_secret:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "message": "Node Secret 不能为空"},
+            )
+
+        # ② 覆写配置文件 + ③ 刷新内存中的配置单例
+        try:
+            cfg.update(node_id=node_id, node_secret=node_secret)
+        except Exception as exc:  # noqa: BLE001 - 写盘失败必须回显给用户
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "message": f"配置保存失败：{exc}"},
+            )
+
+        # ④ 触发隧道平滑重连（内部已兜住所有异常，不会拖垮主进程）
+        #    放到线程池执行：reload 会同步等待新连接建立（最长 8s），
+        #    直接在事件循环里调用会阻塞本地 HTTP 服务（/health、/v1/chat 等）。
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, reload_tunnel_credentials
+            )
+        except Exception as exc:  # noqa: BLE001 - 热重载异常必须回显给用户
+            result = {"ok": False, "connected": False, "reason": str(exc)}
+        connected = bool(result.get("connected"))
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "node_id": node_id,
+                "connected": connected,
+                "message": (
+                    "绑定成功，节点已连上云端"
+                    if connected
+                    else "配置已保存，正在用新凭证重新连接云端…"
+                ),
+            },
+        )
+
     return app
+
+
+def _open_ui_browser(host: str, port: int) -> None:
+    """在系统默认浏览器打开本地配置面板（失败不影响主进程）。"""
+    if os.getenv("APIPAW_NO_UI_BROWSER", "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    url = f"http://{host}:{port}/ui"
+    try:
+        webbrowser.open(url)
+        print(f"[main] 已打开本地配置面板: {url}")
+    except Exception as exc:  # noqa: BLE001 - 打开浏览器失败不致命
+        print(f"[main] 打开配置面板失败（忽略）: {exc}")
 
 
 def _simulate_answer(prompt: str, model: str) -> str:

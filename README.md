@@ -180,6 +180,33 @@ get_config().update(node_name="my-workstation", hardware_type="desktop",
 
 ---
 
+## 可视化配置面板（`/ui`）
+
+**Windows 启动后会自动打开浏览器面板**：不用再手改 JSON，也不用重启进程。
+
+```
+http://127.0.0.1:52415/ui
+```
+
+面板里填 Node ID 与 Node Secret，点「绑定」即可完成三件事：
+
+1. 原子写盘到 `agent.config.json`（`node_id` / `node_secret`）
+2. 刷新内存中的配置单例
+3. **主动断开**当前被拒（403/401）的无效连接，并唤醒退避中的连接循环，
+   让节点用新凭证立刻重新握手 —— 实测 **0.1 秒**内完成重连
+
+相关接口：
+
+| 路由 | 方法 | 说明 |
+|---|---|---|
+| `/ui` | GET | 单文件 HTML 面板（零外部依赖，暗色科幻风） |
+| `/api/status` | GET | 当前绑定状态与云端连接情况（**不返回明文密钥**） |
+| `/api/bind` | POST | 绑定 Node ID / Secret 并触发平滑重连 |
+
+> 环境变量 `APIPAW_NO_UI_BROWSER=1` 可关闭启动时自动打开浏览器（无头/服务器场景）。
+
+---
+
 ## API（OpenAI 兼容）
 
 ### `GET /health`
@@ -586,6 +613,28 @@ Generated on first start; edit and restart (or call `AgentConfig.reload()`).
 | `heartbeat_interval_seconds` | float | `10.0` | Heartbeat period |
 | `disable_telemetry` | bool | `false` | Disable heartbeats |
 | `enable_tray` | bool | `true` | Enable the system tray |
+
+## Visual configuration panel (`/ui`)
+
+On **Windows the browser opens automatically** after startup — no more editing JSON
+by hand, and no process restart.
+
+```
+http://127.0.0.1:52415/ui
+```
+
+Enter the Node ID and Node Secret, then hit **Bind**. The panel atomically writes
+`agent.config.json`, refreshes the in-memory config, and **actively drops the
+currently rejected (403/401) connection** so the tunnel re-handshakes with the
+new credentials — measured reconnect time: **0.1 s**.
+
+| Route | Method | Description |
+|---|---|---|
+| `/ui` | GET | Single-file HTML panel (no external assets) |
+| `/api/status` | GET | Binding status and cloud connectivity (**never returns the plaintext secret**) |
+| `/api/bind` | POST | Bind Node ID / Secret and trigger a smooth reconnect |
+
+> Set `APIPAW_NO_UI_BROWSER=1` to suppress the automatic browser launch (headless/server setups).
 
 ## API (OpenAI-compatible)
 

@@ -152,6 +152,11 @@ class WebSocketTunnel:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
 
+        # 凭证热重载：缓存副本 + 保护锁（握手时以 cfg 为准，这里只是快照）
+        self._cred_lock = threading.RLock()
+        # 立即重连信号：置位后能唤醒正在退避等待的连接循环
+        self._reconnect_event: Optional[asyncio.Event] = None
+
         # 重连参数（指数退避 1s → 2s → 4s … 上限 8s）
         # 上限从 60s 降到 8s：节点离线 40s 以上对派单是致命的
         #（2026-11-05 实测重连间隔曾达 43s，期间所有派单都只能回退模拟回答）
@@ -236,6 +241,45 @@ class WebSocketTunnel:
         """WebSocket 主通道当前是否在线（供 HTTP 心跳让位判断）。"""
         return bool(self._connected and not _is_closed(self._ws))
 
+    def reload_credentials(self, wait_seconds: float = 8.0) -> Dict[str, Any]:
+        """
+        热更新鉴权凭证并触发一次平滑重连（**不重启进程**）。
+
+        用于本地配置面板绑定 Node ID / Node Secret 之后：
+        - 刷新缓存的凭证快照
+        - 重置退避计数，避免沿用旧失败累计导致长时间不重试
+        - 主动断开当前（可能被 403/401 拒绝的）无效连接
+        - 唤醒退避中的连接循环，用新凭证立即重新握手
+
+        返回 ``{"ok": bool, "connected": bool, "node_id": str}``；
+        任何异常都在调用方被兜住，绝不让主进程退出。
+        """
+        with self._cred_lock:
+            self._node_id = self._cfg.node_id
+            self._node_secret = self._cfg.node_secret
+
+        # 新一轮握手不应再受旧失败累计影响
+        self._current_delay = self._base_delay
+
+        loop = self._loop
+        ws = self._ws
+        if loop is not None and loop.is_running() and ws is not None and not _is_closed(ws):
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(), loop).result(timeout=3.0)
+            except Exception as exc:  # noqa: BLE001 - 断开失败不阻塞重连
+                print(f"[ws_tunnel] 主动断开旧连接失败（忽略，等待自动重连）: {exc}")
+
+        # 唤醒退避中的连接循环，让它立刻用新凭证重新握手
+        self._signal_reconnect()
+
+        # 等待新连接建立（最多 wait_seconds）
+        deadline = time.time() + max(wait_seconds, 0.0)
+        while time.time() < deadline:
+            if self.is_connected():
+                return {"ok": True, "connected": True, "node_id": self._cfg.node_id}
+            time.sleep(0.1)
+        return {"ok": True, "connected": False, "node_id": self._cfg.node_id}
+
     # ───────────────────────── 内部 asyncio 任务 ─────────────────────────
 
     def _run_asyncio_loop(self) -> None:
@@ -251,6 +295,40 @@ class WebSocketTunnel:
             except Exception:  # pragma: no cover - 关闭失败不影响退出
                 pass
             self._loop = None
+
+    def _set_reconnect_flag(self) -> None:
+        """在事件循环线程内置位"立即重连"信号。"""
+        event = self._reconnect_event
+        if event is not None:
+            event.set()
+
+    def _signal_reconnect(self) -> None:
+        """线程安全地通知连接循环"立即重连"（用于唤醒退避等待）。"""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        try:
+            loop.call_soon_threadsafe(self._set_reconnect_flag)
+        except Exception as exc:  # noqa: BLE001 - 信号失败不致命
+            print(f"[ws_tunnel] 重连信号发送失败（忽略）: {exc}")
+
+    async def _wait_backoff(self, delay: float) -> None:
+        """
+        等待退避时间；若期间收到"立即重连"信号则提前返回。
+
+        没有这个可唤醒的等待，热重载后必须干等退避计时，
+        新凭证才能生效，违背"平滑重连"的预期。
+        """
+        event = self._reconnect_event
+        if event is None:
+            await asyncio.sleep(delay)
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(delay, 0.0))
+        except (asyncio.TimeoutError, TimeoutError):
+            return
+        # 收到重连信号：清掉标记，立即返回
+        event.clear()
 
     async def _connect_loop(self) -> None:
         """
@@ -272,6 +350,7 @@ class WebSocketTunnel:
            避免在链路拥塞时把源站打爆。
         """
         while self._running:
+            self._reconnect_event = asyncio.Event()
             established = False
             try:
                 print(f"[ws_tunnel] 正在连接云端: {self._ws_url}")
@@ -331,7 +410,7 @@ class WebSocketTunnel:
                 phase = "握手阶段" if not established else "连接阶段"
                 print(f"[ws_tunnel] 连接异常（{phase}）: {exc}，"
                       f"{self._current_delay:.1f}s 后重连...")
-                await asyncio.sleep(self._current_delay)
+                await self._wait_backoff(self._current_delay)
                 if established:
                     # 连上之后掉线 = 链路真有问题 → 继续指数退避
                     self._current_delay = min(self._current_delay * 2, self._max_delay)
@@ -346,7 +425,7 @@ class WebSocketTunnel:
         链路本身是通的（对端或中间层主动断开），此时翻倍退避只会让节点白白离线更久，
         直接影响云端派单命中率。
         """
-        await asyncio.sleep(self._current_delay)
+        await self._wait_backoff(self._current_delay)
         if not keep_delay:
             self._current_delay = min(self._current_delay * 2, self._max_delay)
 
@@ -668,7 +747,7 @@ class WebSocketTunnel:
             future = asyncio.run_coroutine_threadsafe(
                 self._send_json({
                     "type": TYPE_NODE_OFFLINE,
-                    "node_id": self._node_id,
+                    "node_id": self._cfg.node_id,
                     "reason": reason,
                     "timestamp": time.time(),
                 }),
@@ -680,10 +759,16 @@ class WebSocketTunnel:
             print(f"[ws_tunnel] NODE_OFFLINE 通知发送失败（忽略）: {exc}")
 
     def _build_auth_headers(self) -> Dict[str, str]:
-        """构建认证请求头。"""
-        headers = {"X-Node-ID": self._node_id}
-        if self._node_secret:
-            headers["X-Node-Secret"] = self._node_secret
+        """
+        构建认证请求头。
+
+        **实时读取配置**：热重载后必须立刻用新凭证握手，
+        不能用构造时缓存的副本（那正是 403 无法自愈的根因）。
+        """
+        headers = {"X-Node-ID": self._cfg.node_id}
+        secret = self._cfg.node_secret
+        if secret:
+            headers["X-Node-Secret"] = secret
         return headers
 
 
@@ -718,9 +803,28 @@ def is_ws_connected() -> bool:
     return bool(_tunnel_instance and _tunnel_instance.is_connected())
 
 
+def reload_tunnel_credentials(wait_seconds: float = 8.0) -> Dict[str, Any]:
+    """
+    通知全局 WS 隧道热更新凭证并平滑重连（供本地配置面板调用）。
+
+    隧道未启动时返回 ``{"ok": False, "connected": False}``；
+    任何异常都被兜住并转成返回值，绝不向调用方抛异常。
+    """
+    with _tunnel_lock:
+        tunnel = _tunnel_instance
+    if tunnel is None:
+        return {"ok": False, "connected": False, "reason": "tunnel_not_running"}
+    try:
+        return tunnel.reload_credentials(wait_seconds=wait_seconds)
+    except Exception as exc:  # noqa: BLE001 - 热重载失败不能影响主进程
+        print(f"[ws_tunnel] 凭证热重载失败（忽略）: {exc}")
+        return {"ok": False, "connected": False, "reason": str(exc)}
+
+
 __all__ = [
     "WebSocketTunnel",
     "start_ws_tunnel",
     "stop_ws_tunnel",
     "is_ws_connected",
+    "reload_tunnel_credentials",
 ]

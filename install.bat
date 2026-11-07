@@ -1,5 +1,8 @@
 @echo off
 chcp 65001 >nul
+rem 强制 Python 以 UTF-8 读写文件：Windows 默认 GBK 码页下，
+rem 读取含中文的 requirements.txt / .py 源文件可能抛 UnicodeDecodeError。
+set PYTHONUTF8=1
 title APIPaw Agent - 环境初始化
 
 cd /d "%~dp0"

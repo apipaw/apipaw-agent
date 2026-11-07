@@ -65,6 +65,7 @@ RUNTIME_MODULES: Tuple[str, ...] = (
 # 一键脚本：Windows 用户主要用这三个
 WINDOWS_SCRIPTS: Tuple[str, ...] = (
     "install.bat",
+    "install_cn.bat",
     "start.bat",
     "start_silent.vbs",
 )
@@ -84,6 +85,7 @@ SUPPORT_FILES: Tuple[str, ...] = (
 # 必须以 CRLF 落盘的文件（cmd.exe / WScript 对 LF-only 敏感）
 CRLF_FILES: Tuple[str, ...] = (
     "install.bat",
+    "install_cn.bat",
     "start.bat",
     "start_silent.vbs",
 )
@@ -276,7 +278,7 @@ def smoke_test(zip_path: Path, version: str) -> None:
 
         # 说明文档必须是最新双语版，且占位符已全部替换
         guide = (root / QUICKSTART_NAME).read_text(encoding="utf-8")
-        for marker in ("Quick Start | 傻瓜式安装指南", "install.bat", "start.bat"):
+        for marker in ("Quick Start | 傻瓜式安装指南", "install.bat", "install_cn.bat", "start.bat"):
             if marker not in guide:
                 raise SystemExit(f"[FATAL] {QUICKSTART_NAME} 内容陈旧，缺少「{marker}」")
         for stale in ("{{VERSION}}", "{{ZIP_NAME}}"):

@@ -30,12 +30,15 @@
 **[EN] Windows Users:**
 1. Download `APIPaw-Agent-v1.0.4-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
+   - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
+   - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
 3. Double-click `start.bat` to run the agent. A Web UI will automatically pop up in your browser.
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
 1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.4-Windows.zip` 并将其解压到一个文件夹。
-2. 双击运行 `install.bat`，等待环境自动初始化完成。
+2. 双击运行安装脚本，等待环境自动初始化完成。
+   - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
 4. 填入系统分配给您的 `Node ID` 和 `Node Secret`，点击绑定即可亮起绿灯连接云端！
 
@@ -78,6 +81,7 @@ curl http://127.0.0.1:52415/health
 | Symptom | Fix |
 |---|---|
 | `install.bat` flashes and closes | Python is missing, or `Add Python to PATH` was not ticked — reinstall Python 3.10+ with that option |
+| `UnicodeDecodeError` during install | Your system locale is GBK — use `install_cn.bat` (it forces UTF-8 mode) or run `set PYTHONUTF8=1` first |
 | The browser does not open | Open `http://127.0.0.1:52415/ui` manually |
 | Panel keeps saying "not connected" | Check `Node ID` / `Node Secret` — they are case-sensitive and must not contain spaces |
 | "节点不可用" (node unavailable) | The credential was revoked on the cloud side — issue a new one from the console |
@@ -87,6 +91,8 @@ curl http://127.0.0.1:52415/health
 | 现象 | 处理办法 |
 |---|---|
 | 双击 `install.bat` 闪退 | 没装 Python，或安装时没勾 `Add Python to PATH`；重装 Python 3.10+ 并补勾 |
+| 安装时报 `UnicodeDecodeError` | 系统默认 GBK 编码导致，请改用 `install_cn.bat`（已强制 UTF-8 模式），或先执行 `set PYTHONUTF8=1` |
+| pip 下载很慢或超时 | 改用 `install_cn.bat`（清华 TUNA 镜像源） |
 | 浏览器没有自动弹出面板 | 手动打开 `http://127.0.0.1:52415/ui` |
 | 面板一直显示「未连接」 | 检查 `Node ID` / `Node Secret` 是否填错（区分大小写、不要有空格） |
 | 提示「节点不可用」 | 凭证已被云端吊销，请到控制台重新签发 |

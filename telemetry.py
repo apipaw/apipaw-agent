@@ -156,6 +156,42 @@ def collect_gpu_metrics() -> Dict[str, Optional[float]]:
     return metrics
 
 
+# ---- 阶段五 P3：GPU 指标缓存（WS 隧道帧与 HTTP 心跳共用）----
+# 阶段五 P3 之后，节点要额外上报**硬件**显存（云端据此判能力等级 C0~C3）。
+# 这条数据要同时出现在两个通道里：WS 隧道帧（主通道）与 HTTP 心跳体。
+# 若两处各采一次，每个心跳周期就会跑两次 ``nvidia-smi``（Windows 上单次
+# 100~300ms，且会短暂占用 GPU 查询通道）—— 故这里加一层短 TTL 缓存。
+_GPU_METRICS_CACHE: Dict[str, Any] = {"at": 0.0, "value": None}
+_GPU_METRICS_TTL_SEC = 5.0
+_gpu_metrics_lock = threading.Lock()
+
+
+def collect_gpu_metrics_cached(
+    max_age_sec: float = _GPU_METRICS_TTL_SEC,
+) -> Dict[str, Optional[float]]:
+    """带 TTL 缓存的 GPU 指标采集（阶段五 P3）。
+
+    与 :func:`collect_gpu_metrics` 返回**同样形状**的字典，只是短时间内的
+    重复调用直接复用上一次结果。TTL 取 5s —— 心跳周期是 10s，两条通道
+    （WS 帧 + HTTP 体）在同一周期内**必然命中缓存**，nvidia-smi 仍只跑一次。
+
+    ⚠️ 采集失败时返回的字典里各字段为 ``None``（不是抛异常）——
+    与 :func:`collect_gpu_metrics` 的降级语义保持一致：节点照常上报，
+    只是云端拿不到显存 ⇒ 云端保持旧口径结算（**不会**因为缺数据而降薪）。
+    """
+    with _gpu_metrics_lock:
+        cached = _GPU_METRICS_CACHE.get("value")
+        age = time.time() - float(_GPU_METRICS_CACHE.get("at") or 0.0)
+        if cached is not None and age < float(max_age_sec):
+            return cached  # type: ignore[return-value]
+
+    metrics = collect_gpu_metrics()
+    with _gpu_metrics_lock:
+        _GPU_METRICS_CACHE["at"] = time.time()
+        _GPU_METRICS_CACHE["value"] = metrics
+    return metrics
+
+
 class TelemetryReporter:
     """
     心跳上报器。
@@ -184,7 +220,8 @@ class TelemetryReporter:
     def build_payload(self) -> Dict[str, Any]:
         """组装心跳报文体。"""
         monitor = get_yield_monitor()
-        gpu = collect_gpu_metrics()
+        # 阶段五 P3：走缓存版 —— 与 WS 隧道帧共用同一份 nvidia-smi 结果。
+        gpu = collect_gpu_metrics_cached()
         cfg = self._cfg
 
         payload: Dict[str, Any] = {

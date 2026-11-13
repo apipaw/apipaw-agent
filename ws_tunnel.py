@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
+from telemetry import collect_gpu_metrics_cached
 from yield_monitor import get_yield_monitor
 
 enable_utf8_output()
@@ -543,6 +544,14 @@ class WebSocketTunnel:
     def _build_frame(self, frame_type: str, monitor: Any) -> Dict[str, Any]:
         """组装心跳 / 注册帧。"""
         cfg = self._cfg
+        # 阶段五 P3：上报**硬件**显存 —— 云端据此判定节点能力等级（C0~C3），
+        # 能力等级决定阶段五 P3 的「统一算力单价」。
+        # ⚠️ 只报 vram_total_gb / vram_used_gb / vram_free_gb（nvidia-smi 报的
+        #    硬件真值）。``max_vram`` 是「当前模型要多少显存」，**不是**硬件能力，
+        #    云端明确不拿它判等级 —— 两者语义不同，不能混用。
+        # 采集失败时各字段为 None ⇒ 云端视为「显存未知」，
+        #    保持旧口径结算（不会因缺数据而降薪）。
+        gpu = collect_gpu_metrics_cached()
         return {
             "type": frame_type,
             "node_id": cfg.node_id,
@@ -552,6 +561,10 @@ class WebSocketTunnel:
             "hardware_type": cfg.hardware_type,
             "device": cfg.device,
             "max_vram": cfg.max_vram_gb,
+            "vram_total_gb": gpu.get("vram_total_gb"),
+            "vram_used_gb": gpu.get("vram_used_gb"),
+            "vram_free_gb": gpu.get("vram_free_gb"),
+            "gpu_temp_c": gpu.get("gpu_temp_c"),
             "completed_tokens": self._total_completed_tokens,
             "agent_version": AGENT_VERSION,
             "timestamp": time.time(),

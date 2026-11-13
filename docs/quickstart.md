@@ -1,8 +1,8 @@
 ## 🚀 What's New | 本次重磅更新
 
-**[EN]** Added a sleek Local Web UI Console! Say goodbye to manual config file editing. The cloud gateway has also been upgraded to strict "One-Machine-One-Code" database authentication.
+**[EN]** The node now reports its **hardware VRAM** to the cloud, so the gateway can rate your GPU capability tier (C0–C3) correctly and settle node earnings by capability instead of a flat ratio. Node frames also gained a shared GPU-metrics cache, so the `nvidia-smi` query still runs only once per heartbeat.
 
-**[CN]** 新增本地可视化 Web 控制台！彻底告别手动修改配置文件的痛苦。云端鉴权全面升级，支持“一机一码”独立凭证校验。
+**[CN]** 节点现在向云端上报**硬件显存**，网关据此正确判定算力能力等级（C0–C3），未来可按能力等级结算节点收益，而不是一刀切的比例。同时帧内新增 GPU 指标缓存，心跳周期内 `nvidia-smi` 仍然只跑一次。
 
 ---
 

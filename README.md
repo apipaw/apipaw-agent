@@ -19,16 +19,16 @@
 
 ## 🚀 What's New | 本次重磅更新
 
-**[EN]** Added a sleek Local Web UI Console! Say goodbye to manual config file editing. The cloud gateway has also been upgraded to strict "One-Machine-One-Code" database authentication.
+**[EN]** The node now reports its **hardware VRAM** to the cloud, so the gateway can rate your GPU capability tier (C0–C3) correctly and settle node earnings by capability instead of a flat ratio. Node frames also gained a shared GPU-metrics cache, so the `nvidia-smi` query still runs only once per heartbeat.
 
-**[CN]** 新增本地可视化 Web 控制台！彻底告别手动修改配置文件的痛苦。云端鉴权全面升级，支持“一机一码”独立凭证校验。
+**[CN]** 节点现在向云端上报**硬件显存**，网关据此正确判定算力能力等级（C0–C3），未来可按能力等级结算节点收益，而不是一刀切的比例。同时帧内新增 GPU 指标缓存，心跳周期内 `nvidia-smi` 仍然只跑一次。
 
 ---
 
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.4-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.5-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -36,7 +36,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.4-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.5-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -107,7 +107,7 @@ curl http://127.0.0.1:52415/health
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.4/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.5/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

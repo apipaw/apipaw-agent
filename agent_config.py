@@ -37,6 +37,13 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 CONFIG_FILE_NAME = "agent.config.json"
 
 # 客户端版本号（与心跳上报 / 云端注册表保持一致）
+# v1.0.9（阶段六 P2 · 模块 A4）：**断流**语义收紧 ——
+#   推理**跑到一半**后端挂掉（连接被掐 / 未收到 done 帧）⇒ 隧道回
+#   ``backend_stream_broken`` 且**不回** RESPONSE_DONE，云端据此按
+#   D6「断流不计费」免单。此前半截输出会被当成**完整回答**送到云端，
+#   云端照常计费（拿半句话收全价）—— 这是真金白银的记账漏洞。
+#   开跑前就挂（压根连不上）仍回 ``backend_unavailable``，两者**不混**；
+#   同一 request_id 只回**一次**错误帧，绝不静默重试。
 # v1.0.8（阶段六 P1 · 模块 A/B）：**模型解析**口径收紧 ——
 #   云端点名了模型而本机没有 ⇒ **不再**静默回落默认模型（否则会把任务
 #   派给一台装错模型的机器，且账单与实际服务不符）；本机只有唯一模型
@@ -53,7 +60,7 @@ CONFIG_FILE_NAME = "agent.config.json"
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
-AGENT_VERSION = "1.0.8"
+AGENT_VERSION = "1.0.9"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

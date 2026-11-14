@@ -79,6 +79,22 @@ class BackendUnavailable(BackendError):
     code = "backend_unavailable"
 
 
+class BackendStreamBroken(BackendError):
+    """推理**跑到一半**后端挂了（阶段六 P2 · A4 断流语义）。
+
+    与 ``BackendUnavailable`` 的区别：
+
+    - ``BackendUnavailable``：开跑前就失败，一个字都没产出；
+    - ``BackendStreamBroken``：已经吐了分片，连接却中途断了。
+
+    为什么必须区分：云端按 D6 决策，**断流的单不计费**（没跑完的服务不收费），
+    而"压根没跑起来"要按失败重试/换节点处理。两者混为一谈会让云端
+    把"半个答案"当成完整答案计费，或反过来把可重试的失败当成断流。
+    """
+
+    code = "backend_stream_broken"
+
+
 @dataclass
 class BackendUsage:
     """后端回报的**真实** token 用量。"""
@@ -299,6 +315,7 @@ class OllamaBackend(InferenceBackend):
 
         def _worker() -> None:
             """工作线程：逐行读 NDJSON，把分片塞进事件循环队列。"""
+            saw_done = False
             try:
                 req = urllib.request.Request(
                     self._url("/api/chat"),
@@ -334,7 +351,14 @@ class OllamaBackend(InferenceBackend):
                             GenerationChunk(text=content, usage=usage, done=done),
                         )
                         if done:
+                            saw_done = True
                             break
+                # ⚠️ 阶段六 P2 · A4：**没收到 done 帧就断了** ⇒ 断流。
+                #    少了这一句，连接被掐断时会被当成"正常结束"，
+                #    隧道会回 RESPONSE_DONE，云端就会把**半个答案**当完整答案计费。
+                if not saw_done:
+                    raise BackendStreamBroken(
+                        "Ollama 流中途断开（未收到 done 帧）")
             except BackendError as exc:
                 loop.call_soon_threadsafe(queue.put_nowait, exc)
             except (urllib.error.URLError, OSError) as exc:

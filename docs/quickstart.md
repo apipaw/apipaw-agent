@@ -1,5 +1,9 @@
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** If the inference engine **dies halfway through** an answer, the node now reports it as a **broken stream** instead of shipping half an answer as if it were complete — the cloud then **does not charge you** for that request. A failure that happens *before* the engine even starts is still reported separately as "engine unavailable", so the two stay distinguishable. The node never silently retries a failed request, and never sends a "done" marker for an answer that did not finish.
+
+**[CN]** 推理引擎**答到一半挂掉**时，节点现在会明确上报「断流」，而不是把半截输出当成完整答案交上去——云端据此**不向您收费**。开跑前就失败仍单独报「引擎不可用」，两类故障**不混淆**。节点对失败的请求**不做静默重试**，没拿到完整答案时**绝不**回「完成」标记。
+
 **[EN]** The node now answers with **exactly the model the cloud asked for**. If the cloud names a model this machine does not have, the node says so plainly and lists what it does have — it will never quietly answer with a different model and bill you for it. The node also reports its **model list** to the cloud, and the cloud only dispatches a task to a node that actually has that model loaded (older nodes that report nothing are still accepted, so existing nodes keep working). If this machine has exactly one model, that one may stand in.
 
 **[CN]** 节点现在**严格按云端点名的模型**作答：云端点名而本机没有 ⇒ 明确报错并列出本机可用模型，**绝不**偷偷用别的模型顶替（否则您会为没点名的模型付费）；同时把本机**模型清单**上报云端，云端只把任务派给**确实装载了该模型**的节点（老版本节点未上报清单仍照常接单，存量节点不受影响）。本机只有一个模型时允许其顶替。

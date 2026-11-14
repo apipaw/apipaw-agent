@@ -813,6 +813,9 @@ class WebSocketTunnel:
         completion_id = "chatcmpl-%d" % int(time.time() * 1000)
         created = int(time.time())
         usage: Optional[Dict[str, Any]] = None
+        # 阶段六 P2 · A4：已下发的分片数 —— 用来区分「**开跑前**就挂了」
+        # 与「**跑到一半**断了」。两者对云端的语义完全不同（见下方 except 分支）。
+        sent_chunks = 0
         print("[ws_tunnel] 调用推理后端 %s model=%s request_id=%s"
               % (getattr(backend, "name", "?"), model, request_id))
 
@@ -825,6 +828,7 @@ class WebSocketTunnel:
                 max_tokens=payload.get("max_tokens"),
             ):
                 if chunk.text:
+                    sent_chunks += 1
                     await self._send_json({
                         "type": TYPE_RESPONSE_CHUNK,
                         "request_id": request_id,
@@ -842,16 +846,33 @@ class WebSocketTunnel:
                     })
                 if chunk.usage is not None:
                     usage = chunk.usage.to_dict()
+        except inference_backend.BackendStreamBroken as exc:
+            # 阶段六 P2 · A4：推理**跑到一半**断了 ⇒ 明确报断流。
+            # ⚠️ **不做静默重试**：同一 request_id 重试会让云端重复计费。
+            #    是否换节点重派由**网关**决定。
+            print(f"[ws_tunnel] 推理流中途断开: {exc}")
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 502,
+                "error": "backend_stream_broken",
+                "detail": str(exc),
+            })
+            return
         except inference_backend.BackendUnavailable as exc:
             # 后端连不上 ⇒ 明确失败（红线 1：绝不回落模拟回答）。
             # ⚠️ 状态码用 **502** 而不是 503：云端把 503 当作"节点让退/繁忙"
             #    会给节点记冷却 + 扣信用分（那是用户的错，不是后端的错）。
+            # ⚠️ **不做静默重试**（A4）：同一 request_id 重试会让云端重复计费。
             print(f"[ws_tunnel] 推理后端不可用: {exc}")
             await self._send_json({
                 "type": TYPE_RESPONSE_ERROR,
                 "request_id": request_id,
                 "status": 502,
-                "error": "backend_unavailable",
+                # 已经吐过分片 ⇒ 这是「断流」，不是「压根没跑起来」。
+                "error": "backend_stream_broken" if sent_chunks > 0
+                         else "backend_unavailable",
+                "detail": str(exc),
             })
             return
         except inference_backend.BackendError as exc:
@@ -860,7 +881,9 @@ class WebSocketTunnel:
                 "type": TYPE_RESPONSE_ERROR,
                 "request_id": request_id,
                 "status": 502,
-                "error": "backend_error",
+                "error": "backend_stream_broken" if sent_chunks > 0
+                         else "backend_error",
+                "detail": str(exc),
             })
             return
         except Exception as exc:  # noqa: BLE001
@@ -869,7 +892,9 @@ class WebSocketTunnel:
                 "type": TYPE_RESPONSE_ERROR,
                 "request_id": request_id,
                 "status": 500,
-                "error": f"backend_error: {exc}",
+                "error": "backend_stream_broken" if sent_chunks > 0
+                         else f"backend_error: {exc}",
+                "detail": str(exc),
             })
             return
 
@@ -898,6 +923,9 @@ class WebSocketTunnel:
            **绝不**把占位文本当真答案交给云端。
         """
         usage: Optional[Dict[str, Any]] = None
+        # 阶段六 P2 · A4：已下发的分片数（区分「开跑前挂」与「跑一半断」）
+        sent_chunks = 0
+        saw_done = False
         forced_payload = dict(payload or {})
         forced_payload["stream"] = True
         try:
@@ -937,6 +965,7 @@ class WebSocketTunnel:
                         continue
                     data_str = line[6:].strip()
                     if data_str == "[DONE]":
+                        saw_done = True
                         break
                     try:
                         chunk = json.loads(data_str)
@@ -945,23 +974,38 @@ class WebSocketTunnel:
                     chunk_usage = chunk.get("usage")
                     if isinstance(chunk_usage, dict) and chunk_usage:
                         usage = chunk_usage
+                    sent_chunks += 1
                     self._send_json_threadsafe({
                         "type": TYPE_RESPONSE_CHUNK,
                         "request_id": request_id,
                         "chunk": chunk,
                     })
+                # ⚠️ 阶段六 P2 · A4：SSE 流**没有 [DONE]** 就结束 ⇒ 断流。
+                #    少了这一句，半截 SSE 会被当成完整回答回给云端。
+                if not saw_done:
+                    print(f"[ws_tunnel] 本地 SSE 流中途断开（未见 [DONE]）request_id=%s"
+                          % request_id)
+                    self._send_json_threadsafe({
+                        "type": TYPE_RESPONSE_ERROR,
+                        "request_id": request_id,
+                        "status": 502,
+                        "error": "backend_stream_broken",
+                    })
+                    return False, None
         except requests.exceptions.ConnectionError as exc:
             # 本地推理服务压根不在 ⇒ 节点等于**没有推理引擎** ⇒ 明确报错。
             # ⚠️ 状态码 502（不是 503）：503 在云端语义是"节点让退/繁忙"，
             #    会给节点记冷却 + 扣信用分 —— 那是用户的错，不是后端的错。
             # ⚠️ 必须排在 Timeout 之前：``ConnectTimeout`` 同时是这两者的子类
             #    （连不上时 requests 抛 ConnectTimeout，不是 ConnectionError）。
+            # ⚠️ **不做静默重试**（A4）：同一 request_id 重试会让云端重复计费。
             print(f"[ws_tunnel] 本地推理服务不可达: {exc}")
             self._send_json_threadsafe({
                 "type": TYPE_RESPONSE_ERROR,
                 "request_id": request_id,
                 "status": 502,
-                "error": "backend_unavailable",
+                "error": "backend_stream_broken" if sent_chunks > 0
+                         else "backend_unavailable",
             })
             return False, None
         except requests.exceptions.Timeout:
@@ -970,7 +1014,8 @@ class WebSocketTunnel:
                 "type": TYPE_RESPONSE_ERROR,
                 "request_id": request_id,
                 "status": 504,
-                "error": "local_api_timeout",
+                "error": "backend_stream_broken" if sent_chunks > 0
+                         else "local_api_timeout",
             })
             return False, None
         except Exception as exc:  # noqa: BLE001
@@ -979,7 +1024,8 @@ class WebSocketTunnel:
                 "type": TYPE_RESPONSE_ERROR,
                 "request_id": request_id,
                 "status": 500,
-                "error": f"local_api_error: {exc}",
+                "error": "backend_stream_broken" if sent_chunks > 0
+                         else f"local_api_error: {exc}",
             })
             return False, None
         return True, usage

@@ -132,13 +132,14 @@ def resolve_model(requested: str, available: Sequence[str],
     解析顺序（先精确后模糊，绝不臆造）：
     1. **精确命中** —— 请求名在 ``available`` 里 ⇒ 直接用它；
     2. **归一化命中** —— 归一化后相等（``qwen-2.5-72b`` ↔ ``qwen2.5:72b``）⇒ 用本地 tag；
-    3. **回落到默认模型** —— 配置了 ``default_model``（``backend_model``）且它确实在本地 ⇒ 用它
-       （云端要的模型本机没有，但节点被配置成"专跑这个模型"，仍比直接失败好）；
-    4. **本机只有一个模型** ⇒ 用它（无从选择，且这多半就是用户想跑的）；
+    3. **本机只有一个模型** ⇒ 用它（无从选择，且这多半就是用户想跑的）；
+    4. **云端未指定模型** ⇒ 用配置的 ``default_model``（``backend_model``）；
     5. 都不满足 ⇒ 抛 ``BackendError``（**绝不**拿不相干的模型顶替）。
 
-    ⚠️ 第 5 步是红线：宁可明确失败，也不能让云端以为"跑的是它点的模型"，
-    实际上跑的是另一个 —— 那是**静默欺诈**，比失败严重得多。
+    ⚠️ 第 5 步是红线：宁可明确失败（网关据此换节点重试），也不能让云端以为
+    "跑的是它点的模型"，实际上跑的是另一个 —— 那是**静默欺诈**，比失败严重得多。
+    因此当云端**明确点名**了模型而本机没有时，**不**回落到 ``default_model``
+    （盲派单 v2 下节点能从 ``model_cipher`` 解出真实模型名，此时回落＝顶替）。
     """
     wanted = str(requested or "").strip()
     options = [str(m).strip() for m in (available or []) if str(m).strip()]
@@ -150,7 +151,14 @@ def resolve_model(requested: str, available: Sequence[str],
         for opt in options:
             if normalize_model_key(opt) == key:
                 return opt
+        if len(options) == 1:
+            return options[0]
+        if not options:
+            raise BackendError("本机没有可用模型（后端未装载任何模型）")
+        raise BackendError("本机没有云端要求的模型：%s（本地可用：%s）"
+                            % (wanted, ", ".join(options[:8])))
 
+    # 云端未点名 ⇒ 用配置里的默认模型
     fallback = str(default_model or "").strip()
     if fallback and fallback in options:
         return fallback
@@ -158,8 +166,8 @@ def resolve_model(requested: str, available: Sequence[str],
         return options[0]
     if not options:
         raise BackendError("本机没有可用模型（后端未装载任何模型）")
-    raise BackendError("本机没有云端要求的模型：%s（本地可用：%s）"
-                        % (wanted or "(未指定)", ", ".join(options[:8])))
+    raise BackendError("云端未指定模型，且本机有多个模型可选（本地可用：%s）"
+                        % ", ".join(options[:8]))
 
 
 class InferenceBackend:

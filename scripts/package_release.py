@@ -309,6 +309,13 @@ def smoke_test(zip_path: Path, version: str) -> None:
             [sys.executable, "-c", probe],
             capture_output=True,
             text=True,
+            # ⚠️ **必须显式指定编码**：``text=True`` 默认用**本机 locale 编码**解码子进程输出。
+            #    国内 Windows 默认 GBK，而子进程（agent_config 导入时）会打印中文
+            #    ⇒ GBK 解码炸 UnicodeDecodeError ⇒ ``proc.stdout`` 变成 None
+            #    ⇒ 打包脚本在最后一步以 AttributeError 崩掉（发行包已生成却没绿灯）。
+            #    子进程输出是 UTF-8，这里强制按 UTF-8 解码并容错。
+            encoding="utf-8",
+            errors="replace",
             cwd=str(root),
         )
         if proc.returncode != 0:

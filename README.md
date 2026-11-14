@@ -28,7 +28,7 @@
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.7-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.8-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -36,7 +36,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.7-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.8-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -145,7 +145,7 @@ curl http://127.0.0.1:52415/health
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.7/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.8/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

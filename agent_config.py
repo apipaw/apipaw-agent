@@ -37,6 +37,11 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 CONFIG_FILE_NAME = "agent.config.json"
 
 # 客户端版本号（与心跳上报 / 云端注册表保持一致）
+# v1.0.8（阶段六 P1 · 模块 A/B）：**模型解析**口径收紧 ——
+#   云端点名了模型而本机没有 ⇒ **不再**静默回落默认模型（否则会把任务
+#   派给一台装错模型的机器，且账单与实际服务不符）；本机只有唯一模型
+#   时才允许顶替；本机**一个模型都没有** ⇒ 明确报错，让云端换一台节点。
+#   心跳帧的 ``models`` 清单照旧上报（云端据此做模型感知选点）。
 # v1.0.7（阶段六 P0 · 模块 A）：接入**真实推理引擎** ——
 #   新增统一推理后端抽象层 ``inference_backend.py``（Ollama 底座已落地，
 #   vLLM / llama.cpp 预留同接口实现位）；云端派单**不再**返回占位文本，
@@ -48,7 +53,7 @@ CONFIG_FILE_NAME = "agent.config.json"
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
-AGENT_VERSION = "1.0.7"
+AGENT_VERSION = "1.0.8"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

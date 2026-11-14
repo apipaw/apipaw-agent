@@ -25,6 +25,7 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from agent_config import AGENT_VERSION, get_config
+import dispatch_crypto
 from console import enable_utf8_output
 from telemetry import collect_gpu_metrics_cached
 from yield_monitor import get_yield_monitor
@@ -572,6 +573,9 @@ class WebSocketTunnel:
             # 云端收到该标记后才启用"60s 收不到 PONG 即判死"的回收逻辑；
             # 老版本客户端不带此字段 → 云端保持原有行为，完全向后兼容。
             "app_ping": 1,
+            # 阶段五 P4 · 模块 B：声明支持**派单协议 v2**（盲派单载荷）。
+            # 云端据此只下发加密的模型指令；老版本客户端不带此字段 → v1 载荷。
+            "protocol_version": dispatch_crypto.PROTOCOL_VERSION,
         }
 
     async def _handle_messages(self) -> None:
@@ -614,11 +618,52 @@ class WebSocketTunnel:
         elif msg_type:
             print(f"[ws_tunnel] 收到消息 type={msg_type}")
 
+    def _resolve_dispatch_model(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """把协议 v2 的**加密模型指令**解成本地可用的模型名。
+
+        - 老载荷（明文 ``model``）⇒ 原样返回，**完全向后兼容**；
+        - v2 载荷（只有 ``model_cipher``）⇒ 用**本节点自己的密钥**解开；
+        - 解不开（密钥不匹配 / 密文被篡改）⇒ 返回 ``None``，
+          由调用方回 ``model_decrypt_failed`` 错误帧 ——
+          **绝不能**拿着一个乱码模型名去跑推理（那会静默跑错模型）。
+
+        ⚠️ 节点持有自己的密钥，所以它能解开**当前这一单**的模型名 ——
+        这是"要跑模型就必须知道模型名"的物理约束。
+        盲派单真正防住的是「节点能枚举目录、能对比价格」，
+        以及载荷里**根本不含**价格/费率/场景这些商业信息。
+        """
+        if not isinstance(payload, dict):
+            return payload
+        cipher = payload.get("model_cipher")
+        if not cipher:
+            return payload
+        try:
+            model_name = dispatch_crypto.decrypt_model(str(cipher), self._node_secret)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ws_tunnel] 模型指令解密失败: {exc}")
+            return None
+        resolved = dict(payload)
+        resolved["model"] = model_name
+        resolved.pop("model_cipher", None)
+        return resolved
+
     async def _handle_inference_request(self, msg: Dict[str, Any]) -> None:
         """处理云端推理请求：空闲则转发本地 FastAPI，非空闲回 503。"""
         request_id = msg.get("request_id", "unknown")
         payload = msg.get("payload", {})
         monitor = get_yield_monitor()
+
+        # 阶段五 P4 · 模块 B（协议 v2）：载荷里可能只有**加密的模型指令**。
+        # 老版本云端下发的是明文 ``model`` ⇒ 这里原样透传（向后兼容）。
+        payload = self._resolve_dispatch_model(payload)
+        if payload is None:
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 400,
+                "error": "model_decrypt_failed",
+            })
+            return
 
         if not monitor.is_idle:
             print(f"[ws_tunnel] 节点非空闲，拒绝请求 request_id={request_id}")

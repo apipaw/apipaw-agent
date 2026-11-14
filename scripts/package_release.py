@@ -60,6 +60,8 @@ RUNTIME_MODULES: Tuple[str, ...] = (
     "web_ui.py",
     "ws_tunnel.py",
     "yield_monitor.py",
+    # v1.0.6（阶段五 P4 · 模块 B）：派单协议 v2 的载荷解密 —— ws_tunnel 必依赖它
+    "dispatch_crypto.py",
 )
 
 # 一键脚本：Windows 用户主要用这三个

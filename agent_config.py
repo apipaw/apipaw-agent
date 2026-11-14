@@ -37,10 +37,13 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 CONFIG_FILE_NAME = "agent.config.json"
 
 # 客户端版本号（与心跳上报 / 云端注册表保持一致）
+# v1.0.6（阶段五 P4 · 模块 B）：声明支持**派单协议 v2**（盲派单载荷）——
+#   INIT 帧新增 ``protocol_version: 2``，并能解开云端下发的加密模型指令
+#   （``model_cipher``）。老版本云端不下发该字段 ⇒ 走老载荷，完全兼容。
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
-AGENT_VERSION = "1.0.5"
+AGENT_VERSION = "1.0.6"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

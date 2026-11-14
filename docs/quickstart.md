@@ -1,8 +1,8 @@
 ## 🚀 What's New | 本次重磅更新
 
-**[EN]** The node can now run **real models**. It looks for a local **Ollama** engine automatically; when one is present the node answers cloud dispatches with genuine inference and reports the **real token usage**, so the cloud bills you by actual tokens instead of an estimate. When no engine is found the node replies with an explicit `backend_unavailable` error — you are never charged for placeholder text.
+**[EN]** The node now answers with **exactly the model the cloud asked for**. If the cloud names a model this machine does not have, the node says so plainly and lists what it does have — it will never quietly answer with a different model and bill you for it. The node also reports its **model list** to the cloud, and the cloud only dispatches a task to a node that actually has that model loaded (older nodes that report nothing are still accepted, so existing nodes keep working). If this machine has exactly one model, that one may stand in.
 
-**[CN]** 节点现在能跑**真模型**了：自动探测本机 **Ollama** 引擎，探测到就用**真实推理**回答云端派单，并上报**真实 token 用量**，云端按真实 token 精确计费而不是估算；探测不到则明确回 `backend_unavailable` 错误——**绝不会**用占位文本冒充答案让您为"假答案"付费。
+**[CN]** 节点现在**严格按云端点名的模型**作答：云端点名而本机没有 ⇒ 明确报错并列出本机可用模型，**绝不**偷偷用别的模型顶替（否则您会为没点名的模型付费）；同时把本机**模型清单**上报云端，云端只把任务派给**确实装载了该模型**的节点（老版本节点未上报清单仍照常接单，存量节点不受影响）。本机只有一个模型时允许其顶替。
 
 ---
 

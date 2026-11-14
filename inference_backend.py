@@ -111,6 +111,57 @@ class GenerationChunk:
     done: bool = False
 
 
+def normalize_model_key(name: str) -> str:
+    """模型名**归一化键**：去掉所有非字母数字字符并转小写。
+
+    例：``qwen-2.5-72b`` / ``qwen2.5:72b`` / ``Qwen2.5-72B`` ⇒ ``qwen2572b``。
+
+    为什么需要：云端目录里的模型 id（``qwen-2.5-72b``）与本地推理引擎的
+    tag（``qwen2.5:72b``）是**两套命名体系**，直接字符串比较永远对不上。
+    归一化后两者可比 —— 云端据此判断"这台节点装没装这个模型"，
+    节点据此把云端请求解析成本地 tag。
+    """
+    text = str(name or "").strip().lower()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def resolve_model(requested: str, available: Sequence[str],
+                  default_model: str = "") -> str:
+    """把云端请求的模型 id 解析成本地**真实存在**的模型 tag。
+
+    解析顺序（先精确后模糊，绝不臆造）：
+    1. **精确命中** —— 请求名在 ``available`` 里 ⇒ 直接用它；
+    2. **归一化命中** —— 归一化后相等（``qwen-2.5-72b`` ↔ ``qwen2.5:72b``）⇒ 用本地 tag；
+    3. **回落到默认模型** —— 配置了 ``default_model``（``backend_model``）且它确实在本地 ⇒ 用它
+       （云端要的模型本机没有，但节点被配置成"专跑这个模型"，仍比直接失败好）；
+    4. **本机只有一个模型** ⇒ 用它（无从选择，且这多半就是用户想跑的）；
+    5. 都不满足 ⇒ 抛 ``BackendError``（**绝不**拿不相干的模型顶替）。
+
+    ⚠️ 第 5 步是红线：宁可明确失败，也不能让云端以为"跑的是它点的模型"，
+    实际上跑的是另一个 —— 那是**静默欺诈**，比失败严重得多。
+    """
+    wanted = str(requested or "").strip()
+    options = [str(m).strip() for m in (available or []) if str(m).strip()]
+
+    if wanted:
+        if wanted in options:
+            return wanted
+        key = normalize_model_key(wanted)
+        for opt in options:
+            if normalize_model_key(opt) == key:
+                return opt
+
+    fallback = str(default_model or "").strip()
+    if fallback and fallback in options:
+        return fallback
+    if len(options) == 1:
+        return options[0]
+    if not options:
+        raise BackendError("本机没有可用模型（后端未装载任何模型）")
+    raise BackendError("本机没有云端要求的模型：%s（本地可用：%s）"
+                        % (wanted or "(未指定)", ", ".join(options[:8])))
+
+
 class InferenceBackend:
     """推理后端抽象基类 —— 所有后端的**统一契约**。
 
@@ -470,4 +521,6 @@ __all__ = [
     "get_backend",
     "reset_backend_cache",
     "describe_backend",
+    "normalize_model_key",
+    "resolve_model",
 ]

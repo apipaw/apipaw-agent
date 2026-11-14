@@ -770,7 +770,6 @@ class WebSocketTunnel:
     async def _run_backend(self, backend: Any, payload: Dict[str, Any],
                             request_id: str) -> None:
         """调用真实推理后端并把分片 / 真实 usage 回传云端（阶段六 P0 · 模块 A）。"""
-        model = str(payload.get("model") or self._cfg.backend_model or self._cfg.model_name)
         messages = payload.get("messages") or []
         if not messages:
             await self._send_json({
@@ -778,6 +777,30 @@ class WebSocketTunnel:
                 "request_id": request_id,
                 "status": 400,
                 "error": "empty_messages",
+            })
+            return
+
+        # 阶段六 P1 · 模块 A：把云端请求的模型 id **解析成本地真实存在的 tag**。
+        # 云端目录 id（qwen-2.5-72b）与本地 Ollama tag（qwen2.5:7b）是两套命名，
+        # 直接透传必然 404。解析不出来 ⇒ 明确报错，**绝不**拿别的模型顶替。
+        requested_model = str(payload.get("model") or "")
+        try:
+            model = inference_backend.resolve_model(
+                requested_model,
+                self._local_models(),
+                default_model=str(self._cfg.backend_model or self._cfg.model_name or ""),
+            )
+        except inference_backend.BackendError as exc:
+            # ⚠️ 状态码 **502**（不是 503）：云端把 503 当作"节点让退/繁忙"，
+            #    会给节点记冷却 + 扣信用分 —— 那是云端派单与本机模型不匹配，
+            #    不是节点的错。
+            print(f"[ws_tunnel] 本机没有云端要求的模型: {exc}")
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 502,
+                "error": "model_unavailable",
+                "detail": str(exc),
             })
             return
 

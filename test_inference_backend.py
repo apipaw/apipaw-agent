@@ -407,6 +407,64 @@ def main():
     finally:
         fake.stop()
 
+    # ---- 8. 阶段六 P1 · 模块 A：模型解析（云端 id ↔ 本地 tag）----
+    import inference_backend as ib_p1  # noqa: E402
+
+    _record("P1 归一化：qwen-2.5-7b ≡ qwen2.5:7b",
+            ib_p1.normalize_model_key("qwen-2.5-7b")
+            == ib_p1.normalize_model_key("qwen2.5:7b"),
+            ib_p1.normalize_model_key("qwen-2.5-7b"))
+    _record("P1 解析：云端 id 命中本地 tag",
+            ib_p1.resolve_model("qwen-2.5-7b", ["qwen2.5:7b", "llama3:8b"])
+            == "qwen2.5:7b")
+    try:
+        ib_p1.resolve_model("gpt-4o", ["qwen2.5:7b", "llama3:8b"])
+        _record("P1 解析失败时明确报错（不静默顶替模型）", False, "no exception")
+    except ib_p1.BackendError as exc:
+        _record("P1 解析失败时明确报错（不静默顶替模型）", True, str(exc)[:60])
+
+    # 隧道侧：云端下发 "qwen-2.5-7b" ⇒ 节点解析成本地 "qwen2.5:7b" 后再推理
+    inference_backend.reset_backend_cache()
+    fake2 = _FakeOllama()
+    try:
+        frames = []
+        cfg = _cfg(inference_backend="auto", backend_base_url=fake2.base_url,
+                   backend_timeout_sec=10.0)
+        tunnel = _make_tunnel(ws_tunnel, cfg, frames)
+        asyncio.run(_drive(tunnel, {
+            "request_id": "req-p1-model",
+            "payload": {"model": "qwen-2.5-7b",
+                        "messages": [{"role": "user", "content": "你好"}],
+                        "stream": True},
+        }))
+        chunk_frames = [f for f in frames if f.get("type") == "RESPONSE_CHUNK"]
+        err_frames = [f for f in frames if f.get("type") == "RESPONSE_ERROR"]
+        _record("P1 隧道把云端模型 id 解析成本地 tag 后推理",
+                bool(chunk_frames) and not err_frames
+                and chunk_frames[0]["chunk"].get("model") == "qwen2.5:7b",
+                str(chunk_frames[0]["chunk"].get("model") if chunk_frames else err_frames[:1]))
+
+        # 本机没有该模型且不止一个模型 ⇒ 明确 502 model_unavailable，**不出分片**
+        frames = []
+        tunnel = _make_tunnel(ws_tunnel, cfg, frames)
+        asyncio.run(_drive(tunnel, {
+            "request_id": "req-p1-nomodel",
+            "payload": {"model": "gpt-4o",
+                        "messages": [{"role": "user", "content": "你好"}],
+                        "stream": True},
+        }))
+        err_frames = [f for f in frames if f.get("type") == "RESPONSE_ERROR"]
+        chunk_frames = [f for f in frames if f.get("type") == "RESPONSE_CHUNK"]
+        _record("P1 本机没有目标模型 ⇒ 502 model_unavailable",
+                bool(err_frames) and err_frames[0].get("error") == "model_unavailable"
+                and int(err_frames[0].get("status") or 0) == 502,
+                str(err_frames[:1]))
+        _record("P1 模型不匹配时**不产出任何分片**（绝不用别的模型顶替）",
+                not chunk_frames, "chunks=%d" % len(chunk_frames))
+    finally:
+        fake2.stop()
+        inference_backend.reset_backend_cache()
+
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     total = len(RESULTS)
     print("\n===== 阶段六 P0 · 模块 A（Agent 侧）沙箱：%d/%d 通过 =====" % (passed, total))

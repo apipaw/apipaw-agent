@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional, Tuple
 from agent_config import AGENT_VERSION, get_config
 import dispatch_crypto
 from console import enable_utf8_output
+import inference_backend
 from telemetry import collect_gpu_metrics_cached
 from yield_monitor import get_yield_monitor
 
@@ -171,6 +172,10 @@ class WebSocketTunnel:
 
         # 统计
         self._total_completed_tokens = 0
+
+        # 阶段六 P0 · 模块 A（A2）：本地可用模型清单缓存（60s）
+        self._models_cache: list = []
+        self._models_cache_ts: float = 0.0
 
         # 最近一次收到云端**任何**帧的时刻（DAY14 链路看门狗基准）
         self._last_server_activity = 0.0
@@ -576,7 +581,37 @@ class WebSocketTunnel:
             # 阶段五 P4 · 模块 B：声明支持**派单协议 v2**（盲派单载荷）。
             # 云端据此只下发加密的模型指令；老版本客户端不带此字段 → v1 载荷。
             "protocol_version": dispatch_crypto.PROTOCOL_VERSION,
+            # 阶段六 P0 · 模块 A（A2）：上报**本地可用模型清单**与后端类型。
+            # 云端据此做"模型 ↔ 节点"匹配（阶段六 P2），并让运维一眼看出
+            # 节点到底有没有推理引擎（``models`` 为空 ⇒ 无引擎）。
+            # ⚠️ 只**增字段**，帧结构语义不变 ⇒ 老版本云端完全不受影响。
+            "inference_backend": self._backend_label(),
+            "models": self._local_models(),
         }
+
+    def _backend_label(self) -> str:
+        """当前推理后端类型（无后端 ⇒ 空串）。"""
+        backend = inference_backend.get_backend(self._cfg)
+        return getattr(backend, "name", "") if backend is not None else ""
+
+    def _local_models(self) -> list:
+        """本地可用模型清单（带 60s 缓存，避免每次心跳都打后端）。"""
+        now = time.time()
+        cache = getattr(self, "_models_cache", None)
+        cache_ts = float(getattr(self, "_models_cache_ts", 0.0) or 0.0)
+        if cache is not None and cache_ts and (now - cache_ts) < 60.0:
+            return list(cache)
+        models: list = []
+        backend = inference_backend.get_backend(self._cfg)
+        if backend is not None:
+            try:
+                models = list(backend.list_models())[:64]
+            except inference_backend.BackendError as exc:
+                print(f"[ws_tunnel] 读取本地模型清单失败: {exc}")
+                models = []
+        self._models_cache = models
+        self._models_cache_ts = now
+        return list(models)
 
     async def _handle_messages(self) -> None:
         """消息接收循环：转发云端下发的推理请求。"""
@@ -648,7 +683,17 @@ class WebSocketTunnel:
         return resolved
 
     async def _handle_inference_request(self, msg: Dict[str, Any]) -> None:
-        """处理云端推理请求：空闲则转发本地 FastAPI，非空闲回 503。"""
+        """处理云端推理请求（阶段六 P0 · 模块 A：走**真实推理后端**）。
+
+        两条路径：
+        1. **有本地推理后端**（Ollama 等）⇒ 直接调用后端，真流式回传 +
+           真实 usage；
+        2. **无后端** ⇒ 兼容路径：转发到本地 FastAPI（用户自建推理服务的场景），
+           但本地 API 若回的是**占位实现** ⇒ 明确回 ``backend_unavailable``，
+           **绝不**把占位文本当成真答案交给云端。
+
+        ⚠️ 阶段六红线 1：宁可明确失败，也不回落模拟回答。
+        """
         request_id = msg.get("request_id", "unknown")
         payload = msg.get("payload", {})
         monitor = get_yield_monitor()
@@ -675,6 +720,13 @@ class WebSocketTunnel:
             })
             return
 
+        # 阶段六 P0 · 模块 A：优先走真实推理后端。
+        backend = inference_backend.get_backend(self._cfg)
+        if backend is not None:
+            await self._run_backend(backend, payload, request_id)
+            return
+
+        # 无本地推理引擎 ⇒ 走本地 API 转发（兼容用户自建推理服务）。
         if requests is None:
             print(f"[ws_tunnel] 缺少 requests 依赖，无法转发推理请求: {_REQUESTS_IMPORT_ERROR}")
             await self._send_json({
@@ -715,6 +767,98 @@ class WebSocketTunnel:
         await self._send_json(done_frame)
         print(f"[ws_tunnel] 推理请求完成 request_id={request_id}")
 
+    async def _run_backend(self, backend: Any, payload: Dict[str, Any],
+                            request_id: str) -> None:
+        """调用真实推理后端并把分片 / 真实 usage 回传云端（阶段六 P0 · 模块 A）。"""
+        model = str(payload.get("model") or self._cfg.backend_model or self._cfg.model_name)
+        messages = payload.get("messages") or []
+        if not messages:
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 400,
+                "error": "empty_messages",
+            })
+            return
+
+        def _num(key: str, default: float) -> float:
+            try:
+                return float(payload.get(key) if payload.get(key) is not None else default)
+            except (TypeError, ValueError):
+                return default
+
+        completion_id = "chatcmpl-%d" % int(time.time() * 1000)
+        created = int(time.time())
+        usage: Optional[Dict[str, Any]] = None
+        print("[ws_tunnel] 调用推理后端 %s model=%s request_id=%s"
+              % (getattr(backend, "name", "?"), model, request_id))
+
+        try:
+            async for chunk in backend.generate(
+                model,
+                messages,
+                temperature=_num("temperature", 1.0),
+                top_p=_num("top_p", 1.0),
+                max_tokens=payload.get("max_tokens"),
+            ):
+                if chunk.text:
+                    await self._send_json({
+                        "type": TYPE_RESPONSE_CHUNK,
+                        "request_id": request_id,
+                        "chunk": {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": chunk.text},
+                                "finish_reason": None,
+                            }],
+                        },
+                    })
+                if chunk.usage is not None:
+                    usage = chunk.usage.to_dict()
+        except inference_backend.BackendUnavailable as exc:
+            # 后端连不上 ⇒ 明确失败（红线 1：绝不回落模拟回答）。
+            # ⚠️ 状态码用 **502** 而不是 503：云端把 503 当作"节点让退/繁忙"
+            #    会给节点记冷却 + 扣信用分（那是用户的错，不是后端的错）。
+            print(f"[ws_tunnel] 推理后端不可用: {exc}")
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 502,
+                "error": "backend_unavailable",
+            })
+            return
+        except inference_backend.BackendError as exc:
+            print(f"[ws_tunnel] 推理后端出错: {exc}")
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 502,
+                "error": "backend_error",
+            })
+            return
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ws_tunnel] 推理后端异常: {exc}")
+            await self._send_json({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 500,
+                "error": f"backend_error: {exc}",
+            })
+            return
+
+        done_frame: Dict[str, Any] = {"type": TYPE_RESPONSE_DONE, "request_id": request_id}
+        if usage:
+            # 真实 token 用量（后端回报，非估算）⇒ 云端精确计费。
+            done_frame["usage"] = usage
+            print("[ws_tunnel] 上报真实 token 用量 request_id=%s prompt=%s completion=%s"
+                  % (request_id, usage.get("prompt_tokens"), usage.get("completion_tokens")))
+        await self._send_json(done_frame)
+        print(f"[ws_tunnel] 推理请求完成 request_id={request_id}")
+
     def _forward_stream(
         self, url: str, payload: Dict[str, Any], request_id: str
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
@@ -722,15 +866,24 @@ class WebSocketTunnel:
 
         返回 ``(是否成功, 本地上报的真实 usage)``。本地推理若带回了 usage
         （OpenAI 规范的结束帧或任意 chunk 的 usage 字段），这里原样透传给云端。
+
+        阶段六 P0 · 模块 A 的两处修正：
+        1. **强制 ``stream=True``** —— 原先原样透传载荷，云端若下发非流式载荷
+           （老载荷 / 第三方网关），解析器只认 ``data: `` 行 ⇒ 0 分片 0 usage。
+        2. **占位实现拒收** —— 本地 API 若回 ``X-APIPaw-Inference-Mode: placeholder``
+           （本仓库自带的占位推理），这里直接回 ``backend_unavailable``，
+           **绝不**把占位文本当真答案交给云端。
         """
         usage: Optional[Dict[str, Any]] = None
+        forced_payload = dict(payload or {})
+        forced_payload["stream"] = True
         try:
             with requests.post(
                 url,
-                json=payload,
+                json=forced_payload,
                 headers={"Content-Type": "application/json"},
                 stream=True,
-                timeout=60.0,
+                timeout=float(self._cfg.backend_timeout_sec or 60.0),
             ) as resp:
                 if resp.status_code != 200:
                     self._send_json_threadsafe({
@@ -738,6 +891,22 @@ class WebSocketTunnel:
                         "request_id": request_id,
                         "status": resp.status_code,
                         "error": f"local_api_error_{resp.status_code}",
+                    })
+                    return False, None
+                # 本地 API 自报"这是占位实现" ⇒ 明确失败，绝不把占位文本当真答案。
+                mode = ""
+                try:
+                    mode = str(resp.headers.get("X-APIPaw-Inference-Mode") or "").strip().lower()
+                except Exception:  # noqa: BLE001 - 读头失败不影响主流程
+                    mode = ""
+                if mode == "placeholder":
+                    print("[ws_tunnel] 本地 API 是占位实现，拒绝把占位文本当真答案 request_id=%s"
+                          % request_id)
+                    self._send_json_threadsafe({
+                        "type": TYPE_RESPONSE_ERROR,
+                        "request_id": request_id,
+                        "status": 502,
+                        "error": "backend_unavailable",
                     })
                     return False, None
                 for line in resp.iter_lines(decode_unicode=True):
@@ -758,6 +927,20 @@ class WebSocketTunnel:
                         "request_id": request_id,
                         "chunk": chunk,
                     })
+        except requests.exceptions.ConnectionError as exc:
+            # 本地推理服务压根不在 ⇒ 节点等于**没有推理引擎** ⇒ 明确报错。
+            # ⚠️ 状态码 502（不是 503）：503 在云端语义是"节点让退/繁忙"，
+            #    会给节点记冷却 + 扣信用分 —— 那是用户的错，不是后端的错。
+            # ⚠️ 必须排在 Timeout 之前：``ConnectTimeout`` 同时是这两者的子类
+            #    （连不上时 requests 抛 ConnectTimeout，不是 ConnectionError）。
+            print(f"[ws_tunnel] 本地推理服务不可达: {exc}")
+            self._send_json_threadsafe({
+                "type": TYPE_RESPONSE_ERROR,
+                "request_id": request_id,
+                "status": 502,
+                "error": "backend_unavailable",
+            })
+            return False, None
         except requests.exceptions.Timeout:
             print(f"[ws_tunnel] 本地 API 超时 request_id={request_id}")
             self._send_json_threadsafe({

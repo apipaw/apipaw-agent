@@ -20,7 +20,9 @@ import time
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 MODULES = ["agent_config.py", "console.py", "telemetry.py", "token_counter.py",
-           "tray_icon.py", "web_ui.py", "ws_tunnel.py", "yield_monitor.py"]
+           "tray_icon.py", "web_ui.py", "ws_tunnel.py", "yield_monitor.py",
+           # 阶段六 P0 · 模块 A：ws_tunnel 现在依赖统一推理后端抽象层
+           "inference_backend.py"]
 GOOD_SECRET = "good-secret-xyz"
 BAD_SECRET = "bad-secret-000"
 

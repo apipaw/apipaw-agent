@@ -19,6 +19,14 @@ main.py — APIPaw Agent 本地服务入口
 用户在电脑上操作时节点处于 ``YIELDED``（已让退）状态，此时接口返回 **503**，
 让调用方立即把任务转移到其它节点，而不是让本机抢占用户前台。
 
+推理引擎（阶段六 P0 · 模块 A）
+------------------------------
+配置了推理后端（``inference_backend`` / ``backend_base_url``，默认自动探测
+Ollama）时，``/v1/chat/completions`` 走**真实推理**并回传真实 token 用量；
+没有可用后端时退回占位实现，并在响应头自报
+``X-APIPaw-Inference-Mode: placeholder`` —— 云端据此拒绝把占位文本
+当成真答案（阶段六红线 1）。
+
 线程模型
 --------
 - Windows 上 ``pystray`` 需要在主线程跑消息循环，因此：
@@ -47,6 +55,7 @@ from pydantic import BaseModel, Field
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
+import inference_backend
 from telemetry import collect_gpu_metrics, get_reporter
 from token_counter import build_usage, count_prompt_tokens, count_tokens
 from web_ui import UI_HTML
@@ -170,6 +179,8 @@ def create_app() -> FastAPI:
             "available": monitor.is_idle,
             "model_name": cfg.model_name,
             "api_base_url": cfg.api_base_url,
+            # 阶段六 P0 · 模块 A：推理后端状态（有没有真引擎、能跑哪些模型）
+            "inference": inference_backend.describe_backend(cfg),
             "gpu": gpu,
             "yield_metrics": monitor.metrics(),
             "telemetry": get_reporter().status(),
@@ -180,18 +191,33 @@ def create_app() -> FastAPI:
     # ── /v1/models ──
     @app.get("/v1/models")
     async def list_models() -> Dict[str, Any]:
-        """模型列表（OpenAI 规范）。"""
-        return {
-            "object": "list",
-            "data": [
-                {
-                    "id": cfg.model_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "apipaw",
-                }
-            ],
-        }
+        """模型列表（OpenAI 规范）。
+
+        阶段六 P0 · 模块 A：有真实推理后端时，**同时**列出后端可用模型
+        （``cfg.model_name`` 保留为兜底项，老客户端不受影响）。
+        """
+        data: List[Dict[str, Any]] = [
+            {
+                "id": cfg.model_name,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "apipaw",
+            }
+        ]
+        backend = inference_backend.get_backend(cfg)
+        if backend is not None:
+            try:
+                for name in backend.list_models()[:64]:
+                    if name and name != cfg.model_name:
+                        data.append({
+                            "id": name,
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": backend.name,
+                        })
+            except inference_backend.BackendError as exc:
+                print(f"[main] 读取后端模型清单失败: {exc}")
+        return {"object": "list", "data": data}
 
     # ── /v1/chat/completions ──
     @app.post("/v1/chat/completions")
@@ -226,22 +252,33 @@ def create_app() -> FastAPI:
             [{"role": m.role, "content": m.content} for m in request.messages]
         )
 
+        # 阶段六 P0 · 模块 A：有**真实推理后端**时走真推理；
+        # 没有 ⇒ 走占位实现（自报 ``X-APIPaw-Inference-Mode: placeholder``，
+        # 云端据此拒绝把占位文本当真答案）。
+        backend = inference_backend.get_backend(cfg)
+        if backend is not None:
+            return await _serve_with_backend(
+                backend, request, model, completion_id, created, prompt_tokens)
+
         if not request.stream:
             content = _simulate_answer(prompt, model)
-            return {
-                "id": completion_id,
-                "object": "chat.completion",
-                "created": created,
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": build_usage(prompt_tokens, count_tokens(content)),
-            }
+            return JSONResponse(
+                content={
+                    "id": completion_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": build_usage(prompt_tokens, count_tokens(content)),
+                },
+                headers={"X-APIPaw-Inference-Mode": "placeholder"},
+            )
 
         async def event_stream() -> AsyncIterator[str]:
             """SSE 流式输出；逐段检查让退状态，用户一回来立刻中断。"""
@@ -283,7 +320,8 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                     "X-APIPaw-Inference-Mode": "placeholder"},
         )
 
     # ── /ui ── 本地可视化配置面板（单文件 HTML，零外部依赖）──
@@ -370,6 +408,118 @@ def create_app() -> FastAPI:
         )
 
     return app
+
+
+async def _serve_with_backend(backend: Any, request: ChatCompletionRequest, model: str,
+                              completion_id: str, created: int,
+                              prompt_tokens: int) -> Any:
+    """用**真实推理后端**回答 ``/v1/chat/completions``（阶段六 P0 · 模块 A）。
+
+    - 非流式：收齐全文后一次性返回，usage 优先用后端回报的**真实** token；
+    - 流式：后端分片实时转成 SSE（真流式，不是"先算完再切片"）；
+    - 后端中途不可用：流式已开只能断流（结束帧不带 usage ⇒ 云端按估算口径），
+      非流式则明确回 **503 / backend_unavailable**（绝不回落占位文本）。
+    """
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    monitor = get_yield_monitor()
+
+    async def _iter_backend():
+        async for chunk in backend.generate(
+            model,
+            messages,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+        ):
+            yield chunk
+
+    if not request.stream:
+        parts: List[str] = []
+        usage_payload: Optional[Dict[str, int]] = None
+        try:
+            async for chunk in _iter_backend():
+                if chunk.text:
+                    parts.append(chunk.text)
+                if chunk.usage is not None:
+                    usage_payload = chunk.usage.to_dict()
+        except inference_backend.BackendUnavailable as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": str(exc), "type": "apipaw_backend_error",
+                                   "code": "backend_unavailable", "param": None}},
+                headers={"X-APIPaw-Inference-Mode": "backend"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=502,
+                content={"error": {"message": str(exc), "type": "apipaw_backend_error",
+                                   "code": "backend_error", "param": None}},
+                headers={"X-APIPaw-Inference-Mode": "backend"},
+            )
+        content = "".join(parts)
+        if usage_payload is None:
+            usage_payload = build_usage(prompt_tokens, count_tokens(content))
+        return JSONResponse(
+            content={
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": usage_payload,
+            },
+            headers={"X-APIPaw-Inference-Mode": "backend"},
+        )
+
+    async def event_stream() -> AsyncIterator[str]:
+        emitted = ""
+        usage_payload = None
+        try:
+            async for chunk in _iter_backend():
+                if not monitor.is_idle:
+                    break
+                if chunk.text:
+                    emitted += chunk.text
+                    payload = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {"index": 0, "delta": {"content": chunk.text},
+                             "finish_reason": None}
+                        ],
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if chunk.usage is not None:
+                    usage_payload = chunk.usage.to_dict()
+        except Exception as exc:  # noqa: BLE001 - 流已开始，只能断流
+            print(f"[main] 推理后端异常（流式中断）: {exc}")
+        if usage_payload is None:
+            usage_payload = build_usage(prompt_tokens, count_tokens(emitted))
+        final = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": usage_payload,
+        }
+        yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "X-APIPaw-Inference-Mode": "backend"},
+    )
 
 
 def _open_ui_browser(host: str, port: int) -> None:

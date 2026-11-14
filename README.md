@@ -19,16 +19,16 @@
 
 ## 🚀 What's New | 本次重磅更新
 
-**[EN]** The node now reports its **hardware VRAM** to the cloud, so the gateway can rate your GPU capability tier (C0–C3) correctly and settle node earnings by capability instead of a flat ratio. Node frames also gained a shared GPU-metrics cache, so the `nvidia-smi` query still runs only once per heartbeat.
+**[EN]** The node can now run **real models**. It looks for a local **Ollama** engine automatically; when one is present the node answers cloud dispatches with genuine inference and reports the **real token usage**, so the cloud bills you by actual tokens instead of an estimate. When no engine is found the node replies with an explicit `backend_unavailable` error — you are never charged for placeholder text.
 
-**[CN]** 节点现在向云端上报**硬件显存**，网关据此正确判定算力能力等级（C0–C3），未来可按能力等级结算节点收益，而不是一刀切的比例。同时帧内新增 GPU 指标缓存，心跳周期内 `nvidia-smi` 仍然只跑一次。
+**[CN]** 节点现在能跑**真模型**了：自动探测本机 **Ollama** 引擎，探测到就用**真实推理**回答云端派单，并上报**真实 token 用量**，云端按真实 token 精确计费而不是估算；探测不到则明确回 `backend_unavailable` 错误——**绝不会**用占位文本冒充答案让您为"假答案"付费。
 
 ---
 
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.6-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.7-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -36,7 +36,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.6-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.7-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -74,6 +74,44 @@ curl http://127.0.0.1:52415/health
 
 ---
 
+## 🧠 推理引擎 | Real Inference Engine
+
+**[EN]** The node probes a local **Ollama** server (`http://127.0.0.1:11434`) automatically. Configure it in `agent.config.json`:
+
+```json
+{
+  "inference_backend": "auto",
+  "backend_base_url": "http://127.0.0.1:11434",
+  "backend_model": "",
+  "backend_timeout_sec": 60
+}
+```
+
+- `inference_backend`: `auto` (probe Ollama) / `ollama` / `vllm` / `llamacpp`
+- `backend_base_url`: address of your inference engine
+- `backend_model`: leave empty to use the model the cloud asks for
+- `backend_timeout_sec`: engine timeout in seconds
+- Status: `curl http://127.0.0.1:52415/health` → the `inference` field tells you which engine is live and which models it can serve
+
+**[CN]** 节点会自动探测本机 **Ollama**（`http://127.0.0.1:11434`）。在 `agent.config.json` 里配置：
+
+```json
+{
+  "inference_backend": "auto",
+  "backend_base_url": "http://127.0.0.1:11434",
+  "backend_model": "",
+  "backend_timeout_sec": 60
+}
+```
+
+- `inference_backend`：`auto`（自动探测）/ `ollama` / `vllm` / `llamacpp`
+- `backend_base_url`：推理引擎地址
+- `backend_model`：留空表示用云端派单指定的模型
+- `backend_timeout_sec`：引擎超时秒数
+- 查看状态：`curl http://127.0.0.1:52415/health` 的 `inference` 字段会告诉你当前生效的引擎与可用模型
+
+---
+
 ## 🆘 Troubleshooting | 常见问题
 
 **[EN]**
@@ -107,7 +145,7 @@ curl http://127.0.0.1:52415/health
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.6/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.7/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

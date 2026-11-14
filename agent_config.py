@@ -37,13 +37,18 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 CONFIG_FILE_NAME = "agent.config.json"
 
 # 客户端版本号（与心跳上报 / 云端注册表保持一致）
+# v1.0.7（阶段六 P0 · 模块 A）：接入**真实推理引擎** ——
+#   新增统一推理后端抽象层 ``inference_backend.py``（Ollama 底座已落地，
+#   vLLM / llama.cpp 预留同接口实现位）；云端派单**不再**返回占位文本，
+#   后端不可用时明确回 ``backend_unavailable``（绝不回落模拟回答）；
+#   心跳帧新增 ``models``（本地可用模型清单）与 ``inference_backend``。
 # v1.0.6（阶段五 P4 · 模块 B）：声明支持**派单协议 v2**（盲派单载荷）——
 #   INIT 帧新增 ``protocol_version: 2``，并能解开云端下发的加密模型指令
 #   （``model_cipher``）。老版本云端不下发该字段 ⇒ 走老载荷，完全兼容。
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
-AGENT_VERSION = "1.0.6"
+AGENT_VERSION = "1.0.7"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -89,6 +94,18 @@ class AgentConfigModel(BaseModel):
     # 推理运行时完全一致；留空则退化为 tiktoken 或启发式计数。
     tokenizer_path: str = ""
 
+    # ── 推理引擎（阶段六 P0 · 模块 A）───────────────────────
+    # 后端类型：auto（自动探测 Ollama）/ ollama / vllm / llamacpp。
+    # ⚠️ ``auto`` 探不到任何后端 ⇒ 节点**没有**推理引擎，
+    #    云端派单会收到明确的 ``backend_unavailable``，**不会**拿到占位文本。
+    inference_backend: str = "auto"
+    # 后端地址（Ollama 默认 127.0.0.1:11434）。
+    backend_base_url: str = "http://127.0.0.1:11434"
+    # 后端模型名：留空则用派单载荷里的 model（再留空用 model_name 兜底）。
+    backend_model: str = ""
+    # 后端超时（替掉 ws_tunnel 里硬编码的 60s）。
+    backend_timeout_sec: float = Field(default=60.0, ge=1.0, le=600.0)
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "host": "127.0.0.1",
@@ -114,6 +131,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enable_tray": True,
     "log_level": "INFO",
     "tokenizer_path": "",
+    "inference_backend": "auto",
+    "backend_base_url": "http://127.0.0.1:11434",
+    "backend_model": "",
+    "backend_timeout_sec": 60.0,
 }
 
 
@@ -344,6 +365,22 @@ class AgentConfig:
     @property
     def tokenizer_path(self) -> str:
         return self._model.tokenizer_path
+
+    @property
+    def inference_backend(self) -> str:
+        return self._model.inference_backend
+
+    @property
+    def backend_base_url(self) -> str:
+        return self._model.backend_base_url
+
+    @property
+    def backend_model(self) -> str:
+        return self._model.backend_model
+
+    @property
+    def backend_timeout_sec(self) -> float:
+        return self._model.backend_timeout_sec
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return (

@@ -1,5 +1,13 @@
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** The node can now talk to **OpenAI-compatible** inference servers — **vLLM** and **llama.cpp** are both supported, next to the Ollama it already knew. Point the node at your engine in `agent.config.json` (`backend_vllm_base_url` / `backend_llamacpp_base_url`, plus `backend_api_key` if your engine requires one). The auto-probe **only** tries an OpenAI-compatible engine when you write its address down explicitly — it will never mistake some unrelated HTTP service (a web app, or the APIPaw gateway itself, which also lives on port 8000) for an inference engine. Token counts are taken from the engine's own `usage` report, so what the cloud bills you matches what the engine really produced.
+
+**[CN]** 节点现在支持对接 **OpenAI 兼容**推理服务——除原有的 Ollama 外，**vLLM** 与 **llama.cpp** 都能直接用。在 `agent.config.json` 里填好引擎地址（`backend_vllm_base_url` / `backend_llamacpp_base_url`，引擎要鉴权就再填 `backend_api_key`）即可。自动探测**只在您显式写了地址**时才会去试 OpenAI 兼容引擎——绝不会把某个不相干的 HTTP 服务（比如网页应用，或同样占用 8000 端口的 APIPaw 网关本身）误认成推理引擎。token 数取自引擎**自报**的 `usage`，云端计费与引擎真实产出对得上。
+
+**[EN]** The node now measures its **own** speed and reports it: time-to-first-token and tokens-per-second travel with each answer, and the cloud uses those **real** numbers instead of guessing from network round-trips. Node owners can now see how fast their machine actually is, and the platform stops billing on a rough estimate.
+
+**[CN]** 节点现在会**自测**并上报真实性能：首字延迟（TTFT）与吐字速度（tokens/s）随每次回答一并上报，云端据此采用**真实**性能口径，不再依赖网关观测到的网络往返时间去估算。节点业主能看到自己机器的真实速度，平台也不再拿粗略估算当依据。
+
 **[EN]** If the inference engine **dies halfway through** an answer, the node now reports it as a **broken stream** instead of shipping half an answer as if it were complete — the cloud then **does not charge you** for that request. A failure that happens *before* the engine even starts is still reported separately as "engine unavailable", so the two stay distinguishable. The node never silently retries a failed request, and never sends a "done" marker for an answer that did not finish.
 
 **[CN]** 推理引擎**答到一半挂掉**时，节点现在会明确上报「断流」，而不是把半截输出当成完整答案交上去——云端据此**不向您收费**。开跑前就失败仍单独报「引擎不可用」，两类故障**不混淆**。节点对失败的请求**不做静默重试**，没拿到完整答案时**绝不**回「完成」标记。
@@ -76,6 +84,8 @@ curl http://127.0.0.1:52415/health
 - `backend_base_url`: address of your inference engine
 - `backend_model`: leave empty to use the model the cloud asks for
 - `backend_timeout_sec`: engine timeout in seconds
+- `backend_vllm_base_url` / `backend_llamacpp_base_url`: address of your **OpenAI-compatible** engine (vLLM / llama.cpp). Leave empty ⇒ **not** probed automatically, so an unrelated service on port 8000 can never be mistaken for an inference engine
+- `backend_api_key`: optional API key for the OpenAI-compatible engine (`--api-key`)
 - Status: `curl http://127.0.0.1:52415/health` → the `inference` field tells you which engine is live and which models it can serve
 
 **[CN]** 节点会自动探测本机 **Ollama**（`http://127.0.0.1:11434`）。在 `agent.config.json` 里配置：
@@ -93,6 +103,8 @@ curl http://127.0.0.1:52415/health
 - `backend_base_url`：推理引擎地址
 - `backend_model`：留空表示用云端派单指定的模型
 - `backend_timeout_sec`：引擎超时秒数
+- `backend_vllm_base_url` / `backend_llamacpp_base_url`：**OpenAI 兼容**引擎（vLLM / llama.cpp）地址；留空 ⇒ **不参与自动探测**，避免把 8000 端口上的无关服务误认成推理引擎
+- `backend_api_key`：OpenAI 兼容引擎的可选 API Key（`--api-key`）
 - 查看状态：`curl http://127.0.0.1:52415/health` 的 `inference` 字段会告诉你当前生效的引擎与可用模型
 
 ---

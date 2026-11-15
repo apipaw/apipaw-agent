@@ -27,13 +27,13 @@ inference_backend.py — 统一推理后端抽象层（阶段六 P0 · 模块 A�
 后端          协议                                       状态
 ============  ==========================================  ================
 ``ollama``    ``POST /api/chat``（NDJSON 流）+ ``/api/tags``  ✅ P0 已实现
-``vllm``      OpenAI 兼容 ``POST /v1/chat/completions``（SSE）  ⏳ P1 预留位
-``llamacpp``  OpenAI 兼容 ``POST /v1/chat/completions``（SSE）  ⏳ P1 预留位
+``vllm``      OpenAI 兼容 ``POST /v1/chat/completions``（SSE）  ✅ P3 已实现
+``llamacpp``  OpenAI 兼容 ``POST /v1/chat/completions``（SSE）  ✅ P3 已实现
 ============  ==========================================  ================
 
-> ``vllm`` / ``llamacpp`` 已按 D1 在抽象层里**预留好同接口实现位**
-> （类、错误语义、配置项、工厂分支都在），P1 只需补 ``generate`` 的实现体，
-> **上层无需改动**。
+> ``vllm`` / ``llamacpp`` 共用 ``OpenAICompatBackend`` 的实现体
+> （阶段六 P3 · 模块 A2）—— SSE 解析、真实 usage、断流语义与 Ollama 后端
+> **完全同构**，上层（``ws_tunnel`` / ``main``）一行都不用改。
 """
 
 from __future__ import annotations
@@ -55,6 +55,11 @@ BACKEND_LLAMACPP = "llamacpp"
 SUPPORTED_BACKENDS = (BACKEND_AUTO, BACKEND_OLLAMA, BACKEND_VLLM, BACKEND_LLAMACPP)
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+# 阶段六 P3 · 模块 A2：OpenAI 兼容后端的默认地址。
+#   vLLM    —— ``vllm serve`` 默认监听 8000；
+#   llama.cpp —— ``llama-server`` 默认监听 8080。
+DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT_SEC = 60.0
 
 # ``auto`` 模式下探测后端的缓存时长：Ollama 可能比节点晚启动，
@@ -380,42 +385,242 @@ class OllamaBackend(InferenceBackend):
             yield item
 
 
-class ReservedOpenAICompatBackend(InferenceBackend):
-    """OpenAI 兼容后端的**预留位**（vLLM / llama.cpp 共用）。
+class OpenAICompatBackend(InferenceBackend):
+    """OpenAI 兼容后端（vLLM / llama.cpp 共用实现，阶段六 P3 · 模块 A2）。
 
-    D1 拍板：这两个后端在 P1 补实现。接口、错误语义、配置项、工厂分支
-    已经在 P0 铺好 —— P1 只需实现 ``generate``（解析 ``data: `` SSE 行），
-    **上层（``ws_tunnel`` / ``main``）一行都不用改**。
+    协议：
+    - 生成：``POST /v1/chat/completions``，请求体带 ``stream: true``，
+      响应是 **SSE**（每行 ``data: {json}``，末尾 ``data: [DONE]``）；
+    - 模型清单：``GET /v1/models``（返回 ``{"data": [{"id": ...}, ...]}``）。
 
-    当前实现**明确报错**，绝不静默回落模拟回答。
+    与 Ollama 后端**完全同构**的三条语义（上层零改动）：
+
+    1. **真实 usage 优先**：SSE 帧里的 ``usage``（需要后端支持
+       ``stream_options.include_usage``）原样带给云端精确计费；
+       没有就退回估算（由云端处理，节点不编造数字）。
+    2. **断流可辨**：既没收到 ``data: [DONE]``、也没有 ``finish_reason``，
+       就断了 ⇒ ``BackendStreamBroken``（阶段六 P2 · A4），
+       云端据此免单。绝不把半个答案当完整答案。
+    3. **绝不回落模拟回答**：连不上 ⇒ ``BackendUnavailable``。
+
+    ⚠️ 兼容性细节：部分 llama.cpp 版本不认 ``stream_options`` 字段，
+    会对请求体直接回 400。实现里做了**一次**降级重试
+    （去掉 ``stream_options`` 再试），避免"字段不认 ⇒ 整个节点不可用"。
     """
 
-    name = "reserved"
+    name = "openai_compat"
 
+    def __init__(self, base_url: str = "", timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+                 model: str = "", api_key: str = "") -> None:
+        super().__init__(base_url, timeout_sec, model)
+        self.api_key = str(api_key or "").strip()
+
+    # ── HTTP 底座 ──────────────────────────────────────────
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json",
+                   "Accept": "text/event-stream, application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer %s" % self.api_key
+        return headers
+
+    def _http_get_json(self, path: str, timeout: Optional[float] = None) -> Any:
+        req = urllib.request.Request(self._url(path), method="GET",
+                                     headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout_sec) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:  # noqa: BLE001
+                detail = ""
+            raise BackendError("%s 返回 HTTP %s %s" % (self.name, exc.code, detail)) from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise BackendUnavailable("无法连接 %s（%s）：%s"
+                                     % (self.name, self.base_url, exc)) from exc
+        try:
+            return json.loads(raw)
+        except ValueError as exc:
+            raise BackendError("%s %s 返回的不是合法 JSON" % (self.name, path)) from exc
+
+    # ── 契约实现 ────────────────────────────────────────────
     def is_available(self) -> bool:
-        return False
+        """能不能连上**并确认是 OpenAI 兼容服务**。
+
+        ⚠️ 不只看"端口通不通" —— 必须 ``/v1/models`` 返回带 ``data`` 列表的
+        JSON，否则可能把本机**其它** HTTP 服务误认成推理后端。
+        """
+        try:
+            obj = self._http_get_json("/v1/models", timeout=min(5.0, self.timeout_sec))
+        except BackendError:
+            return False
+        return isinstance(obj, dict) and isinstance(obj.get("data"), list)
 
     def list_models(self) -> List[str]:
-        return []
+        obj = self._http_get_json("/v1/models")
+        names: List[str] = []
+        for item in (obj.get("data") or []):
+            if isinstance(item, dict):
+                mid = item.get("id")
+                if mid:
+                    names.append(str(mid))
+        return names
 
     async def generate(self, model: str, messages: Sequence[Dict[str, Any]],
                        temperature: float = 1.0, top_p: float = 1.0,
                        max_tokens: Optional[int] = None) -> AsyncIterator[GenerationChunk]:
-        raise BackendUnavailable(
-            "后端 %s 尚未实现（阶段六 P1 补：OpenAI 兼容 SSE 解析）" % self.name)
-        yield  # pragma: no cover - 仅用于满足异步生成器协议
+        target = model or self.model
+        if not target:
+            raise BackendError("未指定模型名（配置 backend_model 或派单载荷里的 model）")
+        body: Dict[str, Any] = {
+            "model": target,
+            "messages": [dict(m) for m in messages],
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "stream": True,
+            # 请求后端在流里带上真实 usage（拿不到就退回估算，云端负责兜底）
+            "stream_options": {"include_usage": True},
+        }
+        if max_tokens and int(max_tokens) > 0:
+            body["max_tokens"] = int(max_tokens)
+
+        import asyncio  # 局部导入：仅在真正生成时才需要事件循环
+
+        loop = asyncio.get_event_loop()
+        queue: "asyncio.Queue[Any]" = asyncio.Queue()
+        _DONE = object()
+
+        def _worker() -> None:
+            """工作线程：逐行读 SSE，把分片塞进事件循环队列。"""
+            saw_done = False
+            saw_finish = False
+            usage_payload: Optional[Dict[str, Any]] = None
+            retried_without_stream_options = False
+            try:
+                while True:
+                    req = urllib.request.Request(
+                        self._url("/v1/chat/completions"),
+                        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                        method="POST",
+                        headers=self._headers(),
+                    )
+                    try:
+                        resp = urllib.request.urlopen(req, timeout=self.timeout_sec)
+                    except urllib.error.HTTPError as exc:
+                        detail = ""
+                        try:
+                            detail = exc.read().decode("utf-8", "replace")[:300]
+                        except Exception:  # noqa: BLE001
+                            detail = ""
+                        # 兼容降级：老 llama.cpp 不认 stream_options ⇒ 去掉再试一次
+                        if (exc.code in (400, 422)
+                                and not retried_without_stream_options
+                                and "stream_options" in detail):
+                            retried_without_stream_options = True
+                            body.pop("stream_options", None)
+                            continue
+                        raise BackendError("%s 返回 HTTP %s %s"
+                                           % (self.name, exc.code, detail)) from exc
+                    except (urllib.error.URLError, OSError) as exc:
+                        raise BackendUnavailable("%s 连接失败（%s）：%s"
+                                                 % (self.name, self.base_url, exc)) from exc
+
+                    with resp:
+                        for raw_line in resp:
+                            line = raw_line.decode("utf-8", "replace").strip()
+                            if not line or not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                saw_done = True
+                                break
+                            try:
+                                obj = json.loads(data)
+                            except ValueError:
+                                continue  # 非 JSON 的 data 行直接跳过
+                            if not isinstance(obj, dict):
+                                continue
+                            if obj.get("error"):
+                                err = obj.get("error")
+                                if isinstance(err, dict):
+                                    err = err.get("message") or err
+                                raise BackendError("%s 报错：%s" % (self.name, err))
+                            # 真实 usage（可能出现在任意一帧，也可能是收尾的独立帧）
+                            raw_usage = obj.get("usage")
+                            if isinstance(raw_usage, dict):
+                                usage_payload = raw_usage
+                            choices = obj.get("choices") or []
+                            if not choices:
+                                continue
+                            choice = choices[0] if isinstance(choices[0], dict) else {}
+                            delta = choice.get("delta") or {}
+                            content = delta.get("content") or ""
+                            if choice.get("finish_reason"):
+                                saw_finish = True
+                            if content:
+                                loop.call_soon_threadsafe(
+                                    queue.put_nowait, GenerationChunk(text=content))
+                    break
+
+                # 收尾：把真实 usage 作为最后一个分片带出去
+                if usage_payload:
+                    try:
+                        usage = BackendUsage(
+                            prompt_tokens=int(usage_payload.get("prompt_tokens") or 0),
+                            completion_tokens=int(usage_payload.get("completion_tokens") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        usage = None
+                    if usage is not None:
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, GenerationChunk(text="", usage=usage, done=True))
+                # ⚠️ 阶段六 P2 · A4 同构：**没收到 [DONE] 也没有 finish_reason** ⇒ 断流。
+                #    少了这一句，半个答案会被当成完整答案计费。
+                if not (saw_done or saw_finish):
+                    raise BackendStreamBroken(
+                        "%s 流中途断开（未收到 [DONE] 帧）" % self.name)
+            except BackendError as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            except (urllib.error.URLError, OSError) as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, BackendUnavailable("%s 连接中断：%s" % (self.name, exc)))
+            except Exception as exc:  # noqa: BLE001 - 兜底，绝不让线程静默死掉
+                loop.call_soon_threadsafe(queue.put_nowait, BackendError(str(exc)))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+        threading.Thread(target=_worker, name="%s-gen" % self.name, daemon=True).start()
+
+        while True:
+            item = await queue.get()
+            if item is _DONE:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
 
-class VLLMBackend(ReservedOpenAICompatBackend):
-    """vLLM 预留位（高端多卡节点）。"""
+class VLLMBackend(OpenAICompatBackend):
+    """vLLM 后端（高端多卡节点）。"""
 
     name = BACKEND_VLLM
 
+    def __init__(self, base_url: str = DEFAULT_VLLM_BASE_URL,
+                 timeout_sec: float = DEFAULT_TIMEOUT_SEC, model: str = "",
+                 api_key: str = "") -> None:
+        super().__init__(base_url or DEFAULT_VLLM_BASE_URL, timeout_sec, model, api_key)
 
-class LlamaCppBackend(ReservedOpenAICompatBackend):
-    """llama.cpp 预留位（无 GPU 老机器）。"""
+
+class LlamaCppBackend(OpenAICompatBackend):
+    """llama.cpp 后端（无 GPU 老机器）。"""
 
     name = BACKEND_LLAMACPP
+
+    def __init__(self, base_url: str = DEFAULT_LLAMACPP_BASE_URL,
+                 timeout_sec: float = DEFAULT_TIMEOUT_SEC, model: str = "",
+                 api_key: str = "") -> None:
+        super().__init__(base_url or DEFAULT_LLAMACPP_BASE_URL, timeout_sec, model, api_key)
 
 
 # ── 工厂 & 单例 ─────────────────────────────────────────────
@@ -438,15 +643,17 @@ def _cfg_value(cfg: Any, name: str, default: Any = "") -> Any:
 def build_backend(cfg: Any = None) -> Optional[InferenceBackend]:
     """按配置构造后端实例（**不**做连通性探测）。
 
-    - ``auto``：构造 Ollama 后端（是否可用由 ``is_available`` 判定）；
+    - ``auto``：构造**第一个候选**（Ollama）—— 真正的选点在
+      :func:`get_backend`（那里才做探测）；
     - ``ollama``：显式 Ollama；
-    - ``vllm`` / ``llamacpp``：预留实现位。
+    - ``vllm`` / ``llamacpp``：OpenAI 兼容后端。
 
     返回 ``None`` 表示配置非法。
     """
     kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).strip().lower()
     base_url = str(_cfg_value(cfg, "backend_base_url", "") or "").strip()
     model = str(_cfg_value(cfg, "backend_model", "") or "").strip()
+    api_key = str(_cfg_value(cfg, "backend_api_key", "") or "").strip()
     try:
         timeout = float(_cfg_value(cfg, "backend_timeout_sec", DEFAULT_TIMEOUT_SEC)
                         or DEFAULT_TIMEOUT_SEC)
@@ -456,54 +663,98 @@ def build_backend(cfg: Any = None) -> Optional[InferenceBackend]:
     if kind in (BACKEND_AUTO, BACKEND_OLLAMA):
         return OllamaBackend(base_url or DEFAULT_OLLAMA_BASE_URL, timeout, model)
     if kind == BACKEND_VLLM:
-        return VLLMBackend(base_url, timeout, model)
+        return VLLMBackend(
+            str(_cfg_value(cfg, "backend_vllm_base_url", "") or "").strip()
+            or DEFAULT_VLLM_BASE_URL, timeout, model, api_key)
     if kind == BACKEND_LLAMACPP:
-        return LlamaCppBackend(base_url, timeout, model)
+        return LlamaCppBackend(
+            str(_cfg_value(cfg, "backend_llamacpp_base_url", "") or "").strip()
+            or DEFAULT_LLAMACPP_BASE_URL, timeout, model, api_key)
     return None
+
+
+def build_auto_candidates(cfg: Any = None) -> List[InferenceBackend]:
+    """``auto`` 模式的候选后端列表（**按优先级**）。
+
+    顺序：D1 拍板的「Ollama 优先」⇒ Ollama → vLLM → llama.cpp。
+
+    ⚠️ **只有显式配置了地址的 OpenAI 兼容引擎才会进候选**：
+    默认端口（8000 / 8080）在很多机器上已经被别的服务占着
+    （比如 APIPaw 自己的网关就跑在 8000），盲目探测会把**不相干的服务**
+    误认成推理后端 —— 那比"探不到"危险得多。
+    想让 auto 顺带探 vLLM / llama.cpp，把对应地址写进配置即可。
+    """
+    base_url = str(_cfg_value(cfg, "backend_base_url", "") or "").strip()
+    model = str(_cfg_value(cfg, "backend_model", "") or "").strip()
+    api_key = str(_cfg_value(cfg, "backend_api_key", "") or "").strip()
+    try:
+        timeout = float(_cfg_value(cfg, "backend_timeout_sec", DEFAULT_TIMEOUT_SEC)
+                        or DEFAULT_TIMEOUT_SEC)
+    except (TypeError, ValueError):
+        timeout = DEFAULT_TIMEOUT_SEC
+
+    candidates: List[InferenceBackend] = [
+        OllamaBackend(base_url or DEFAULT_OLLAMA_BASE_URL, timeout, model)]
+    vllm_url = str(_cfg_value(cfg, "backend_vllm_base_url", "") or "").strip()
+    if vllm_url:
+        candidates.append(VLLMBackend(vllm_url, timeout, model, api_key))
+    llamacpp_url = str(_cfg_value(cfg, "backend_llamacpp_base_url", "") or "").strip()
+    if llamacpp_url:
+        candidates.append(LlamaCppBackend(llamacpp_url, timeout, model, api_key))
+    return candidates
 
 
 def get_backend(cfg: Any = None, force_refresh: bool = False) -> Optional[InferenceBackend]:
     """获取当前生效的推理后端（带缓存）。
 
-    - 配置为 ``auto`` 时会**探测** Ollama：探不到 ⇒ 返回 ``None``
+    - 配置为 ``auto`` 时会**逐个探测**候选（Ollama 优先）：全探不到 ⇒ 返回 ``None``
       （调用方据此回 ``backend_unavailable``，绝不回落模拟回答）。
-    - 探测结果缓存 ``AUTO_PROBE_TTL_SEC`` 秒：Ollama 晚于节点启动时，
+    - 探测结果缓存 ``AUTO_PROBE_TTL_SEC`` 秒：推理引擎晚于节点启动时，
       节点能在 TTL 内自动发现它，无需重启。
+    - 显式指定 ``vllm`` / ``llamacpp`` 时**不探测**（连不上就在真正调用时
+      报 ``backend_unavailable``），避免每次心跳都白等超时。
     """
     global _backend_instance, _backend_key, _backend_probed_at
 
     kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).strip().lower()
     base_url = str(_cfg_value(cfg, "backend_base_url", "") or "").strip()
     model = str(_cfg_value(cfg, "backend_model", "") or "").strip()
+    vllm_url = str(_cfg_value(cfg, "backend_vllm_base_url", "") or "").strip()
+    llamacpp_url = str(_cfg_value(cfg, "backend_llamacpp_base_url", "") or "").strip()
     try:
         timeout = float(_cfg_value(cfg, "backend_timeout_sec", DEFAULT_TIMEOUT_SEC)
                         or DEFAULT_TIMEOUT_SEC)
     except (TypeError, ValueError):
         timeout = DEFAULT_TIMEOUT_SEC
-    key = "%s|%s|%s|%.1f" % (kind, base_url, model, timeout)
+    key = "%s|%s|%s|%s|%s|%.1f" % (kind, base_url, model, vllm_url, llamacpp_url, timeout)
 
     now = time.time()
     with _backend_lock:
         if not force_refresh and _backend_instance is not None and _backend_key == key:
             if kind != BACKEND_AUTO or (now - _backend_probed_at) < AUTO_PROBE_TTL_SEC:
                 return _backend_instance
-        backend = build_backend(cfg)
-        if backend is None:
-            _backend_instance = None
-            _backend_key = key
-            _backend_probed_at = now
-            return None
-        if kind == BACKEND_AUTO and not backend.is_available():
+        if kind == BACKEND_AUTO:
+            picked: Optional[InferenceBackend] = None
+            for candidate in build_auto_candidates(cfg):
+                try:
+                    if candidate.is_available():
+                        picked = candidate
+                        break
+                except BackendError:
+                    continue
+        else:
+            picked = build_backend(cfg)
+        if picked is None:
             # auto 模式探不到 ⇒ 本节点**没有**推理引擎（返回 None，
             # 上层必须回 backend_unavailable）。
             _backend_instance = None
             _backend_key = key
             _backend_probed_at = now
             return None
-        _backend_instance = backend
+        _backend_instance = picked
         _backend_key = key
         _backend_probed_at = now
-        return backend
+        return picked
 
 
 def reset_backend_cache() -> None:
@@ -541,15 +792,20 @@ __all__ = [
     "BACKEND_LLAMACPP",
     "SUPPORTED_BACKENDS",
     "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_VLLM_BASE_URL",
+    "DEFAULT_LLAMACPP_BASE_URL",
     "BackendError",
     "BackendUnavailable",
+    "BackendStreamBroken",
     "BackendUsage",
     "GenerationChunk",
     "InferenceBackend",
     "OllamaBackend",
+    "OpenAICompatBackend",
     "VLLMBackend",
     "LlamaCppBackend",
     "build_backend",
+    "build_auto_candidates",
     "get_backend",
     "reset_backend_cache",
     "describe_backend",

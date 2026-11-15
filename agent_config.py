@@ -60,7 +60,12 @@ CONFIG_FILE_NAME = "agent.config.json"
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
-AGENT_VERSION = "1.0.9"
+# v1.0.10（阶段六 P3 · 模块 A2）：OpenAI 兼容推理后端（vLLM / llama.cpp）**落地** ——
+#   新增 ``OpenAICompatBackend``（SSE 解析 + 真实 usage + 断流语义与 Ollama 同构）；
+#   ``auto`` 探测支持多引擎（Ollama 优先，OpenAI 兼容引擎需**显式配置地址**
+#   才进候选，避免误认本机其它 HTTP 服务）；DONE 帧新增 ``perf``
+#   （节点自测的 TTFT / 吐字速度），云端据此用**真实**性能口径。
+AGENT_VERSION = "1.0.10"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -117,6 +122,14 @@ class AgentConfigModel(BaseModel):
     backend_model: str = ""
     # 后端超时（替掉 ws_tunnel 里硬编码的 60s）。
     backend_timeout_sec: float = Field(default=60.0, ge=1.0, le=600.0)
+    # 阶段六 P3 · 模块 A2：OpenAI 兼容后端（vLLM / llama.cpp）的地址。
+    # ⚠️ **留空 = 不参与 auto 探测**。默认端口 8000/8080 常常已经被别的服务
+    #    占着（APIPaw 自己的网关就在 8000），盲目探测会把不相干的服务
+    #    误认成推理引擎。显式写进来 = 明确"这台机器上确实有 vLLM"。
+    backend_vllm_base_url: str = ""
+    backend_llamacpp_base_url: str = ""
+    # OpenAI 兼容后端的可选 API Key（vLLM --api-key / llama.cpp --api-key）。
+    backend_api_key: str = ""
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -147,6 +160,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "backend_base_url": "http://127.0.0.1:11434",
     "backend_model": "",
     "backend_timeout_sec": 60.0,
+    "backend_vllm_base_url": "",
+    "backend_llamacpp_base_url": "",
+    "backend_api_key": "",
 }
 
 
@@ -393,6 +409,18 @@ class AgentConfig:
     @property
     def backend_timeout_sec(self) -> float:
         return self._model.backend_timeout_sec
+
+    @property
+    def backend_vllm_base_url(self) -> str:
+        return self._model.backend_vllm_base_url
+
+    @property
+    def backend_llamacpp_base_url(self) -> str:
+        return self._model.backend_llamacpp_base_url
+
+    @property
+    def backend_api_key(self) -> str:
+        return self._model.backend_api_key
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return (

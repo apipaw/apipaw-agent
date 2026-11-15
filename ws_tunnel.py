@@ -820,6 +820,13 @@ class WebSocketTunnel:
               % (getattr(backend, "name", "?"), model, request_id))
 
         try:
+            # 阶段六 P3 · 模块 A2：**真实 TTFT 口径** —— 节点自测
+            #   ttft_ms = 开始请求后端 → 首个内容分片；
+            #   gen_ms  = 首个内容分片 → 生成结束。
+            # 云端此前只能用「网关观测到的」TTFT（含网络往返），
+            # 现在节点把自测值一并报上去，云端优先用这个。
+            perf_started = time.time()
+            perf_first_at = None
             async for chunk in backend.generate(
                 model,
                 messages,
@@ -828,6 +835,8 @@ class WebSocketTunnel:
                 max_tokens=payload.get("max_tokens"),
             ):
                 if chunk.text:
+                    if perf_first_at is None:
+                        perf_first_at = time.time()
                     sent_chunks += 1
                     await self._send_json({
                         "type": TYPE_RESPONSE_CHUNK,
@@ -904,6 +913,21 @@ class WebSocketTunnel:
             done_frame["usage"] = usage
             print("[ws_tunnel] 上报真实 token 用量 request_id=%s prompt=%s completion=%s"
                   % (request_id, usage.get("prompt_tokens"), usage.get("completion_tokens")))
+        # 阶段六 P3 · 模块 A2：把节点自测的性能读数一并报上去（真实 TTFT 口径）。
+        perf_ended = time.time()
+        perf: Dict[str, float] = {}
+        if perf_first_at is not None:
+            perf["ttft_ms"] = round(max(0.0, (perf_first_at - perf_started) * 1000.0), 2)
+            perf["gen_ms"] = round(max(0.0, (perf_ended - perf_first_at) * 1000.0), 2)
+        if perf.get("gen_ms", 0.0) > 0 and usage:
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            if completion_tokens > 0:
+                perf["throughput_tps"] = round(
+                    float(completion_tokens) / (perf["gen_ms"] / 1000.0), 3)
+        if perf:
+            done_frame["perf"] = perf
+            print("[ws_tunnel] 上报真实性能读数 request_id=%s ttft=%sms tps=%s"
+                  % (request_id, perf.get("ttft_ms"), perf.get("throughput_tps")))
         await self._send_json(done_frame)
         print(f"[ws_tunnel] 推理请求完成 request_id={request_id}")
 

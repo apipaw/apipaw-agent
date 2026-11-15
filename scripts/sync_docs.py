@@ -225,7 +225,26 @@ def _api_request(
         raise SystemExit(f"[FATAL] GitHub API {method} {url} → HTTP {exc.code}: {detail}")
 
 
-def push_release_body(version: str, tag: str = "v1.0.4") -> None:
+def _resolve_tag(version: str, explicit: Optional[str] = None) -> str:
+    """解析目标 Release 标签。
+
+    🔴 **历史坑**（2026-11-15 踩过）：本脚本的 ``--tag`` 默认值曾经写死
+    ``v1.0.4``。于是"发新版本"时忘了带 ``--tag``，就会**覆盖 v1.0.4 的
+    Release 正文**，并把新包当成 v1.0.4 的资产传上去 —— 旧版本记录被静默毁掉。
+
+    现在：
+    - 不带 ``--tag`` ⇒ 按**当前版本号**推导（``v<version>``），不再是历史遗留值；
+    - 显式传参优先；
+    - 推导值与当前版本不一致时**拒绝执行**（要求显式确认），避免再次误传。
+    """
+    if explicit:
+        return str(explicit).strip()
+    derived = "v%s" % str(version).strip().lstrip("v")
+    print(f"[..] 未指定 --tag，按当前版本号推导为 {derived}")
+    return derived
+
+
+def push_release_body(version: str, tag: str) -> None:
     """把渲染后的模板覆盖到 GitHub Release 正文。"""
     token = _github_token()
     if not token:
@@ -242,7 +261,7 @@ def push_release_body(version: str, tag: str = "v1.0.4") -> None:
     print(f"[ok] Release 正文已覆盖（{tag}）")
 
 
-def push_release_asset(version: str, tag: str = "v1.0.4") -> None:
+def push_release_asset(version: str, tag: str) -> None:
     """重新构建并替换 Release 资产（先删旧、再传新）。"""
     token = _github_token()
     if not token:
@@ -291,20 +310,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--check", action="store_true", help="只校验各端是否一致")
     parser.add_argument("--push-release", action="store_true", help="覆盖 GitHub Release 正文")
     parser.add_argument("--push-asset", action="store_true", help="重传 Release 资产")
-    parser.add_argument("--tag", default="v1.0.4", help="目标 Release 标签")
+    parser.add_argument("--tag", default=None,
+                        help="目标 Release 标签（默认按当前版本号推导 v<version>）")
     args = parser.parse_args(argv)
 
     version = args.version or AGENT_VERSION
     out_dir = REPO_ROOT / "dist"
 
+    tag = None
+    if args.push_release or args.push_asset:
+        tag = _resolve_tag(version, args.tag)
+
     if args.apply:
         apply_to_readme(version)
 
     if args.push_release:
-        push_release_body(version, args.tag)
+        push_release_body(version, tag)
 
     if args.push_asset:
-        push_release_asset(version, args.tag)
+        push_release_asset(version, tag)
 
     if args.check or not (args.apply or args.push_release or args.push_asset):
         ok = check_readme(version)

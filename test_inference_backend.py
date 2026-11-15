@@ -7,7 +7,8 @@
   1. Ollama 底座：连通性探测 / 模型清单（``/api/tags``）
   2. Ollama 底座：真流式生成（``/api/chat`` NDJSON）→ 拿到**真实** usage
   3. ``auto`` 自动探测：探得到 ⇒ 选中 Ollama；探不到 ⇒ 无后端（None）
-  4. vLLM / llama.cpp 预留位：明确报 ``backend_unavailable``（不回落模拟）
+  4. vLLM / llama.cpp：OpenAI 兼容后端已就绪；连不上 ⇒ 明确
+     ``backend_unavailable``（不回落模拟）
   5. 隧道派单：有后端 ⇒ 回真分片 + 真实 usage；无后端 ⇒ 回
      ``backend_unavailable``（**绝不**把占位文本当真答案）
   6. 心跳帧上报 ``models`` / ``inference_backend``（A2）
@@ -236,13 +237,21 @@ def main():
         _record("auto 模式探不到后端 ⇒ None（上层据此报 backend_unavailable）",
                 none_backend is None, str(none_backend))
 
-        # ---- 4. vLLM / llama.cpp 预留位 ----
-        reserved = inference_backend.build_backend({"inference_backend": "vllm"})
-        _record("vllm 预留位已就绪", reserved is not None and reserved.name == "vllm")
+        # ---- 4. vLLM / llama.cpp：OpenAI 兼容实现（阶段六 P3 · 模块 A2）----
+        vllm = inference_backend.build_backend({"inference_backend": "vllm"})
+        _record("vLLM 后端已就绪（OpenAI 兼容实现，不再是预留位）",
+                vllm is not None and vllm.name == "vllm")
+        llcpp = inference_backend.build_backend({"inference_backend": "llamacpp"})
+        _record("llama.cpp 后端已就绪（OpenAI 兼容实现）",
+                llcpp is not None and llcpp.name == "llamacpp")
 
-        async def _gen_reserved():
+        # 连不上 ⇒ 明确 backend_unavailable（**绝不**回落模拟回答）
+        dead = inference_backend.VLLMBackend("http://127.0.0.1:59998", 2.0, "m")
+        llcpp_dead = inference_backend.LlamaCppBackend("http://127.0.0.1:59997", 2.0, "m")
+
+        async def _gen_dead(backend):
             try:
-                async for _ in reserved.generate("m", []):
+                async for _ in backend.generate("m", []):
                     pass
             except inference_backend.BackendUnavailable as exc:
                 return str(exc)
@@ -250,9 +259,12 @@ def main():
                 return "unexpected:%s" % exc
             return "no-error"
 
-        msg = asyncio.run(_gen_reserved())
-        _record("vllm 预留位明确报 backend_unavailable（不回落模拟）",
-                "backend_unavailable" in msg or "尚未实现" in msg, msg[:80])
+        msg = asyncio.run(_gen_dead(dead))
+        _record("vLLM 连不上 ⇒ 明确 backend_unavailable（不回落模拟）",
+                "backend_unavailable" in msg or "连接失败" in msg, msg[:80])
+        msg2 = asyncio.run(_gen_dead(llcpp_dead))
+        _record("llama.cpp 连不上 ⇒ 明确 backend_unavailable（不回落模拟）",
+                "backend_unavailable" in msg2 or "连接失败" in msg2, msg2[:80])
 
         # ---- 5. 隧道派单 ----
         # 5a. 有后端 ⇒ 真分片 + 真实 usage

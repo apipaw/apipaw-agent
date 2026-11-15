@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
 import inference_backend
-from telemetry import collect_gpu_metrics, get_reporter
+from telemetry import collect_gpu_metrics_cached, get_reporter
 from token_counter import build_usage, count_prompt_tokens, count_tokens
 from web_ui import UI_HTML
 from yield_monitor import NodeState, get_yield_monitor
@@ -164,10 +164,16 @@ def create_app() -> FastAPI:
 
     # ── /health ──
     @app.get("/health")
-    async def health() -> Dict[str, Any]:
-        """节点健康检查：返回当前状态、显存、温度与让退指标。"""
+    def health() -> Dict[str, Any]:
+        """节点健康检查：返回当前状态、显存、温度与让退指标。
+
+        ⚠️ **刻意是同步端点**：``describe_backend`` 会做**阻塞**的后端探测。
+        若写成 ``async def``，这些阻塞调用会跑在事件循环里，把整个节点服务
+        拖住（CI 的就绪轮询因此永远超时）。FastAPI 会把同步端点丢进线程池
+        执行，事件循环不受影响。
+        """
         monitor = get_yield_monitor()
-        gpu = collect_gpu_metrics()
+        gpu = collect_gpu_metrics_cached()
         return {
             "status": "ok",
             "agent_version": AGENT_VERSION,
@@ -190,11 +196,13 @@ def create_app() -> FastAPI:
 
     # ── /v1/models ──
     @app.get("/v1/models")
-    async def list_models() -> Dict[str, Any]:
+    def list_models() -> Dict[str, Any]:
         """模型列表（OpenAI 规范）。
 
         阶段六 P0 · 模块 A：有真实推理后端时，**同时**列出后端可用模型
         （``cfg.model_name`` 保留为兜底项，老客户端不受影响）。
+
+        ⚠️ 与 ``/health`` 同理：**同步端点**，避免阻塞探测卡住事件循环。
         """
         data: List[Dict[str, Any]] = [
             {
@@ -207,7 +215,8 @@ def create_app() -> FastAPI:
         backend = inference_backend.get_backend(cfg)
         if backend is not None:
             try:
-                for name in backend.list_models()[:64]:
+                for name in backend.list_models(
+                        timeout_sec=inference_backend.HEALTH_PROBE_TIMEOUT_SEC)[:64]:
                     if name and name != cfg.model_name:
                         data.append({
                             "id": name,
@@ -255,7 +264,8 @@ def create_app() -> FastAPI:
         # 阶段六 P0 · 模块 A：有**真实推理后端**时走真推理；
         # 没有 ⇒ 走占位实现（自报 ``X-APIPaw-Inference-Mode: placeholder``，
         # 云端据此拒绝把占位文本当真答案）。
-        backend = inference_backend.get_backend(cfg)
+        # ⚠️ 探测是**阻塞**调用 ⇒ 丢到线程池跑，别把事件循环堵住。
+        backend = await asyncio.to_thread(inference_backend.get_backend, cfg)
         if backend is not None:
             return await _serve_with_backend(
                 backend, request, model, completion_id, created, prompt_tokens)

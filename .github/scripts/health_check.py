@@ -59,11 +59,18 @@ def _post_json(path: str, payload: dict, timeout: float = 20.0) -> tuple[int, by
         return exc.code, exc.read()
 
 
-def _wait_ready(timeout: float = 30.0) -> None:
+def _wait_ready(timeout: float = 60.0) -> None:
+    """轮询 ``/health`` 直到服务就绪。
+
+    ⚠️ 单次请求给 5s 预算（不是 2s）：``/health`` 首次调用要做一次后端
+    连通性探测（阻塞 HTTP，有界 1s）+ 一次 GPU 采样（nvidia-smi），
+    在冷启动的 CI 机器上可能超过 2s。**关键是探针必须比服务端慢**，
+    否则客户端先超时 ⇒ 误判"服务未就绪"。
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            status, _ = _get("/health", timeout=2.0)
+            status, _ = _get("/health", timeout=5.0)
             if status == 200:
                 return
         except Exception:

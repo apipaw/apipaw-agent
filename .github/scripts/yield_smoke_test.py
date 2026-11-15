@@ -55,6 +55,12 @@ def check_config_roundtrip() -> None:
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
+        # ⚠️ 子进程走 UTF-8（``console.enable_utf8_output``），而父进程在
+        #    中文 Windows 上默认按 GBK 解码 ⇒ 直接 UnicodeDecodeError
+        #    （stdout 变 None）。这里显式按 UTF-8 解码并容错，
+        #    让 CI（UTF-8）与本地中文环境（GBK）都能跑通。
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
     assert proc.returncode == 0, f"配置往返失败:\n{proc.stdout}\n{proc.stderr}"

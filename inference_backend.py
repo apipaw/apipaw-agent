@@ -66,6 +66,18 @@ DEFAULT_TIMEOUT_SEC = 60.0
 # 缓存太长会让节点「永远发现不了后端」，太短则失去热插拔能力。
 AUTO_PROBE_TTL_SEC = 30.0
 
+# ── 健康检查的探测预算（秒）──────────────────────────────────
+# ⚠️ **为什么必须有界**：后端探测是**阻塞**的 HTTP 调用（``urllib``）。
+#    ``backend_timeout_sec`` 默认 60s —— 若把它用在 ``/health`` 上，
+#    一次探测就能把节点本地服务卡住 60 秒。CI 的就绪轮询（单次 2s 预算）
+#    因此永远拿不到响应 ⇒ 表现为「服务在 30s 内未就绪」。
+#    健康检查只关心「有没有后端、能不能用」，**不需要**完整的长超时，
+#    因此这里给一份独立的短预算。
+HEALTH_PROBE_TIMEOUT_SEC = 1.0
+
+# ``/health`` 快照的复用时长（秒）：面板/监控狂刷时也不必反复探测后端。
+HEALTH_SNAPSHOT_TTL_SEC = 5.0
+
 
 class BackendError(RuntimeError):
     """后端调用失败（HTTP 非 2xx / 响应体不可解析 / 协议不符）。"""
@@ -196,9 +208,13 @@ class InferenceBackend:
 
     子类必须实现：
     - ``name``：后端标识（写入配置与上报帧）
-    - ``is_available()``：能否连通（不抛异常，只返回布尔）
-    - ``list_models()``：本地可用模型清单
+    - ``is_available(timeout_sec=None)``：能否连通（不抛异常，只返回布尔）
+    - ``list_models(timeout_sec=None)``：本地可用模型清单
     - ``generate(...)``：异步生成器，产出 ``GenerationChunk``
+
+    ⚠️ ``is_available`` / ``list_models`` 接受**可选**的 ``timeout_sec``：
+    健康检查会用一份**短预算**（``HEALTH_PROBE_TIMEOUT_SEC``）调用它们，
+    避免一次慢探测把节点服务卡住（详见 ``describe_backend``）。
     """
 
     name = "base"
@@ -210,10 +226,10 @@ class InferenceBackend:
         self.model = model or ""
 
     # ── 契约 ────────────────────────────────────────────────
-    def is_available(self) -> bool:
+    def is_available(self, timeout_sec: Optional[float] = None) -> bool:
         raise NotImplementedError
 
-    def list_models(self) -> List[str]:
+    def list_models(self, timeout_sec: Optional[float] = None) -> List[str]:
         raise NotImplementedError
 
     async def generate(self, model: str, messages: Sequence[Dict[str, Any]],
@@ -272,15 +288,16 @@ class OllamaBackend(InferenceBackend):
             raise BackendUnavailable("无法连接 Ollama（%s）：%s" % (self.base_url, exc)) from exc
 
     # ── 契约实现 ────────────────────────────────────────────
-    def is_available(self) -> bool:
+    def is_available(self, timeout_sec: Optional[float] = None) -> bool:
+        budget = float(timeout_sec) if timeout_sec else min(5.0, self.timeout_sec)
         try:
-            self._http("/api/tags", timeout=min(5.0, self.timeout_sec))
+            self._http("/api/tags", timeout=budget)
             return True
         except BackendError:
             return False
 
-    def list_models(self) -> List[str]:
-        raw = self._http("/api/tags")
+    def list_models(self, timeout_sec: Optional[float] = None) -> List[str]:
+        raw = self._http("/api/tags", timeout=timeout_sec)
         try:
             obj = json.loads(raw)
         except ValueError as exc:
@@ -445,20 +462,21 @@ class OpenAICompatBackend(InferenceBackend):
             raise BackendError("%s %s 返回的不是合法 JSON" % (self.name, path)) from exc
 
     # ── 契约实现 ────────────────────────────────────────────
-    def is_available(self) -> bool:
+    def is_available(self, timeout_sec: Optional[float] = None) -> bool:
         """能不能连上**并确认是 OpenAI 兼容服务**。
 
         ⚠️ 不只看"端口通不通" —— 必须 ``/v1/models`` 返回带 ``data`` 列表的
         JSON，否则可能把本机**其它** HTTP 服务误认成推理后端。
         """
+        budget = float(timeout_sec) if timeout_sec else min(5.0, self.timeout_sec)
         try:
-            obj = self._http_get_json("/v1/models", timeout=min(5.0, self.timeout_sec))
+            obj = self._http_get_json("/v1/models", timeout=budget)
         except BackendError:
             return False
         return isinstance(obj, dict) and isinstance(obj.get("data"), list)
 
-    def list_models(self) -> List[str]:
-        obj = self._http_get_json("/v1/models")
+    def list_models(self, timeout_sec: Optional[float] = None) -> List[str]:
+        obj = self._http_get_json("/v1/models", timeout=timeout_sec)
         names: List[str] = []
         for item in (obj.get("data") or []):
             if isinstance(item, dict):
@@ -704,18 +722,8 @@ def build_auto_candidates(cfg: Any = None) -> List[InferenceBackend]:
     return candidates
 
 
-def get_backend(cfg: Any = None, force_refresh: bool = False) -> Optional[InferenceBackend]:
-    """获取当前生效的推理后端（带缓存）。
-
-    - 配置为 ``auto`` 时会**逐个探测**候选（Ollama 优先）：全探不到 ⇒ 返回 ``None``
-      （调用方据此回 ``backend_unavailable``，绝不回落模拟回答）。
-    - 探测结果缓存 ``AUTO_PROBE_TTL_SEC`` 秒：推理引擎晚于节点启动时，
-      节点能在 TTL 内自动发现它，无需重启。
-    - 显式指定 ``vllm`` / ``llamacpp`` 时**不探测**（连不上就在真正调用时
-      报 ``backend_unavailable``），避免每次心跳都白等超时。
-    """
-    global _backend_instance, _backend_key, _backend_probed_at
-
+def _backend_cache_key(cfg: Any = None) -> str:
+    """共享缓存的键：配置变了 ⇒ 必须重新探测。"""
     kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).strip().lower()
     base_url = str(_cfg_value(cfg, "backend_base_url", "") or "").strip()
     model = str(_cfg_value(cfg, "backend_model", "") or "").strip()
@@ -726,22 +734,53 @@ def get_backend(cfg: Any = None, force_refresh: bool = False) -> Optional[Infere
                         or DEFAULT_TIMEOUT_SEC)
     except (TypeError, ValueError):
         timeout = DEFAULT_TIMEOUT_SEC
-    key = "%s|%s|%s|%s|%s|%.1f" % (kind, base_url, model, vllm_url, llamacpp_url, timeout)
+    return "%s|%s|%s|%s|%s|%.1f" % (kind, base_url, model, vllm_url, llamacpp_url, timeout)
+
+
+def _probe_auto(cfg: Any = None,
+                probe_timeout_sec: Optional[float] = None) -> Optional[InferenceBackend]:
+    """``auto`` 模式的连通性探测（**不**写共享缓存）。
+
+    返回第一个可连通的后端；全探不到 ⇒ ``None``（调用方据此回
+    ``backend_unavailable``，绝不回落模拟回答）。
+    """
+    for candidate in build_auto_candidates(cfg):
+        try:
+            if candidate.is_available(timeout_sec=probe_timeout_sec):
+                return candidate
+        except BackendError:
+            continue
+    return None
+
+
+def get_backend(cfg: Any = None, force_refresh: bool = False,
+                probe_timeout_sec: Optional[float] = None) -> Optional[InferenceBackend]:
+    """获取当前生效的推理后端（带缓存）。
+
+    - 配置为 ``auto`` 时会**逐个探测**候选（Ollama 优先）：全探不到 ⇒ 返回 ``None``
+      （调用方据此回 ``backend_unavailable``，绝不回落模拟回答）。
+    - 探测结果缓存 ``AUTO_PROBE_TTL_SEC`` 秒：推理引擎晚于节点启动时，
+      节点能在 TTL 内自动发现它，无需重启。
+    - 显式指定 ``vllm`` / ``llamacpp`` 时**不探测**（连不上就在真正调用时
+      报 ``backend_unavailable``），避免每次心跳都白等超时。
+    - ``probe_timeout_sec``：给 ``auto`` 探测用的**有界**预算。默认 ``None``
+      ⇒ 沿用后端自身的超时配置（最多 5s 的连通性探测）。
+    """
+    global _backend_instance, _backend_key, _backend_probed_at
+
+    kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).strip().lower()
+    key = _backend_cache_key(cfg)
 
     now = time.time()
     with _backend_lock:
-        if not force_refresh and _backend_instance is not None and _backend_key == key:
+        # ⚠️ 命中判定**不**要求 ``_backend_instance`` 非空 —— 探不到后端
+        #    （本机没装推理引擎）是**合法常态**，若不缓存这种"否定结论"，
+        #    每次调用都要重新探一遍，慢引擎会把调用方拖住好几秒。
+        if not force_refresh and _backend_key == key:
             if kind != BACKEND_AUTO or (now - _backend_probed_at) < AUTO_PROBE_TTL_SEC:
                 return _backend_instance
         if kind == BACKEND_AUTO:
-            picked: Optional[InferenceBackend] = None
-            for candidate in build_auto_candidates(cfg):
-                try:
-                    if candidate.is_available():
-                        picked = candidate
-                        break
-                except BackendError:
-                    continue
+            picked = _probe_auto(cfg, probe_timeout_sec)
         else:
             picked = build_backend(cfg)
         if picked is None:
@@ -757,6 +796,21 @@ def get_backend(cfg: Any = None, force_refresh: bool = False) -> Optional[Infere
         return picked
 
 
+def get_cached_backend(cfg: Any = None) -> Optional[InferenceBackend]:
+    """**只读**共享缓存：命中且未过期则返回当前后端，**绝不触发探测**。
+
+    健康检查用它避免"为了显示状态而惊动后端"。
+    """
+    kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).strip().lower()
+    key = _backend_cache_key(cfg)
+    now = time.time()
+    with _backend_lock:
+        if _backend_key == key and _backend_instance is not None:
+            if kind != BACKEND_AUTO or (now - _backend_probed_at) < AUTO_PROBE_TTL_SEC:
+                return _backend_instance
+    return None
+
+
 def reset_backend_cache() -> None:
     """清空后端缓存（测试用 / 热更新配置用）。"""
     global _backend_instance, _backend_key, _backend_probed_at
@@ -766,23 +820,82 @@ def reset_backend_cache() -> None:
         _backend_probed_at = 0.0
 
 
-def describe_backend(cfg: Any = None) -> Dict[str, Any]:
-    """给 ``/health`` 用的后端状态快照（不含任何凭证）。"""
-    backend = get_backend(cfg)
-    kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).lower()
+_health_cache_lock = threading.Lock()
+_health_cache: Dict[str, Any] = {"key": "", "at": 0.0, "value": None}
+
+
+def describe_backend(cfg: Any = None, probe_timeout_sec: Optional[float] = None,
+                     use_cache: bool = True) -> Dict[str, Any]:
+    """给 ``/health`` 用的后端状态快照（不含任何凭证）。
+
+    ⚠️ **必须快**：``/health`` 是节点的心跳面，也是 CI 的就绪探针，
+    而后端探测是**阻塞** HTTP 调用。本函数因此：
+
+    ① 用**有界**的探测预算（默认 ``HEALTH_PROBE_TIMEOUT_SEC`` = 1s），
+       绝不把 ``backend_timeout_sec``（默认 60s）用在健康检查上；
+    ② 短时间内复用上一次的快照（``HEALTH_SNAPSHOT_TTL_SEC`` = 5s）。
+
+    ⚠️ **不污染共享缓存**：健康检查的短预算探测**不会**写进
+    :func:`get_backend` 的单例缓存。否则一次"探超时"会把"本机没后端"
+    这个结论钉死 30 秒，导致真正开始推理时也要等 30 秒才能恢复。
+
+    探不到后端时返回 ``available=False`` —— 这**不是**错误：
+    节点没装推理引擎是合法状态（云端据此报 ``backend_unavailable``）。
+    """
+    budget = float(probe_timeout_sec or HEALTH_PROBE_TIMEOUT_SEC)
+    kind = str(_cfg_value(cfg, "inference_backend", BACKEND_AUTO) or BACKEND_AUTO).strip().lower()
+    base_url = str(_cfg_value(cfg, "backend_base_url", "") or "").strip()
+    vllm_url = str(_cfg_value(cfg, "backend_vllm_base_url", "") or "").strip()
+    llamacpp_url = str(_cfg_value(cfg, "backend_llamacpp_base_url", "") or "").strip()
+    cache_key = "%s|%s|%s|%s" % (kind, base_url, vllm_url, llamacpp_url)
+
+    now = time.time()
+    if use_cache:
+        with _health_cache_lock:
+            cached = _health_cache.get("value")
+            age = now - float(_health_cache.get("at") or 0.0)
+            if (cached is not None and _health_cache.get("key") == cache_key
+                    and age < HEALTH_SNAPSHOT_TTL_SEC):
+                return dict(cached)
+
+    # ① 已有后端实例（真推理路径已经选过）⇒ 直接用，不重复探测
+    backend = get_cached_backend(cfg)
+    reachable = backend is not None
+    if backend is None:
+        # ② 没有 ⇒ 用**短预算**独立探一次（不写共享缓存）
+        if kind == BACKEND_AUTO:
+            # ``_probe_auto`` 内部已做可达性判定 ⇒ 探到即"可达"
+            backend = _probe_auto(cfg, budget)
+            reachable = backend is not None
+        else:
+            backend = build_backend(cfg)
+            if backend is not None:
+                try:
+                    reachable = backend.is_available(timeout_sec=budget)
+                except BackendError:
+                    reachable = False
+
     models: List[str] = []
     if backend is not None:
         try:
-            models = backend.list_models()
+            models = backend.list_models(timeout_sec=budget)
         except BackendError:
             models = []
-    return {
+    snapshot = {
         "configured": kind,
         "active": backend.name if backend is not None else "",
-        "available": backend is not None,
+        # ⚠️ ``available`` 的口径是「**此刻真的连得上**」，不是「配置了」。
+        #    显式配置了 vLLM 但引擎已经挂掉 ⇒ 面板必须显示不可用，
+        #    否则业主会一直等一个永远不来的答案。
+        "available": bool(reachable),
         "base_url": backend.base_url if backend is not None else "",
         "models": models,
     }
+    with _health_cache_lock:
+        _health_cache["key"] = cache_key
+        _health_cache["at"] = time.time()
+        _health_cache["value"] = snapshot
+    return dict(snapshot)
 
 
 __all__ = [
@@ -794,6 +907,8 @@ __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
     "DEFAULT_VLLM_BASE_URL",
     "DEFAULT_LLAMACPP_BASE_URL",
+    "HEALTH_PROBE_TIMEOUT_SEC",
+    "HEALTH_SNAPSHOT_TTL_SEC",
     "BackendError",
     "BackendUnavailable",
     "BackendStreamBroken",
@@ -807,6 +922,7 @@ __all__ = [
     "build_backend",
     "build_auto_candidates",
     "get_backend",
+    "get_cached_backend",
     "reset_backend_cache",
     "describe_backend",
     "normalize_model_key",

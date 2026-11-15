@@ -29,3 +29,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# 阶段六 P4 灰度演练临时目录（含节点密钥，绝不入库）
+.p4_rehearsal/

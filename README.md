@@ -19,6 +19,10 @@
 
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** **No more command line for models.** The local panel (**http://127.0.0.1:52415/ui**) gained a **「本地 Ollama 模型管理」(Local Ollama Models)** block: it lists the models already installed on this machine (and tells you plainly when Ollama is not running), shows what the platform currently recommends — models that online nodes are actually serving, with their price and how much VRAM they need — and then does the rest for you. **「一键拉取并绑定」(Pull & Bind)** downloads the model in the background and automatically writes it into `agent.config.json` as your serving model; **「设为当前接单模型」(Set as serving model)** switches an already-installed model with one click. Model names are strictly validated, and the node only ever talks to `127.0.0.1` — no credential ever leaves your machine.
+
+**[CN]** **装模型不用再开命令行了。** 本地面板（**http://127.0.0.1:52415/ui**）新增 **「本地 Ollama 模型管理」** 区块：列出本机已装好的模型（Ollama 没启动也会如实告诉您），再把**云端当前推荐**的模型摆出来——也就是线上真有节点在跑的那些，带价格和显存门槛。剩下的动作面板替您做：**「一键拉取并绑定」** 会在后台把模型下载下来，并自动写进 `agent.config.json` 成为您的接单模型；**「设为当前接单模型」** 则让已装的模型一键切换。模型名经过严格校验，节点只跟 `127.0.0.1` 说话，任何凭证都不会离开您的机器。
+
 **[EN]** The panel now **fills itself in from the link**: open `http://127.0.0.1:52415/ui?node_id=your-node&node_secret=your-secret` and the Node ID and Node Secret are already in the boxes — just click **"绑 定 节 点"**. That link is what the owner console hands out when it issues a credential in one click, so "get a credential → start the node" is now a copy-and-paste instead of a transcription job. The secret is wiped from the address bar as soon as it is read, so it does not linger in your browser history.
 
 **[CN]** 面板现在**能从链接自动填好**：打开 `http://127.0.0.1:52415/ui?node_id=你的节点&node_secret=你的密钥`，Node ID 与 Node Secret 已经填在框里了，点「绑 定 节 点」即可。业主控制台一键签发凭证时给出的正是这条链接 —— 于是「拿到凭证 → 启动节点」从**手抄**变成了**复制粘贴**。密钥一读入即从地址栏抹掉，不会留在浏览器历史里。
@@ -60,7 +64,7 @@
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.12-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.13-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -68,7 +72,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.12-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.13-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -148,6 +152,26 @@ curl http://127.0.0.1:52415/health
 
 ---
 
+## 🧲 模型管理（免命令行） | Model Management Without a Console
+
+**[EN]** In the panel (**http://127.0.0.1:52415/ui**) open the **「本地 Ollama 模型管理」** block:
+
+| Action | What happens |
+|---|---|
+| **一键拉取并绑定** | Downloads the model through your local Ollama in a background thread, then writes it to `agent.config.json` (`backend_model` + `model_name`) — the node starts serving it on the next dispatch |
+| **设为当前接单模型** | Switches to an already-installed model, effective immediately (no restart) |
+
+**[CN]** 在面板（**http://127.0.0.1:52415/ui**）打开 **「本地 Ollama 模型管理」** 区块：
+
+| 操作 | 效果 |
+|---|---|
+| **一键拉取并绑定** | 通过本机 Ollama 后台线程下载模型，随后写进 `agent.config.json`（`backend_model` + `model_name`）—— 下一次派单即用它接单 |
+| **设为当前接单模型** | 切换到已装好的模型，**立即生效**（不必重启） |
+
+> Ollama 没启动时面板会如实提示「本机 Ollama 未运行」，而不是报错；装好 Ollama 后自动识别。
+
+---
+
 ## 🆘 Troubleshooting | 常见问题
 
 **[EN]**
@@ -181,7 +205,7 @@ curl http://127.0.0.1:52415/health
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.12/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.13/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

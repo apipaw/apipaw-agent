@@ -12,6 +12,10 @@ main.py — APIPaw Agent 本地服务入口
 ``/ui``                                  GET     本地可视化配置面板（单文件 HTML）
 ``/api/status``                          GET     面板状态查询（不含明文密钥）
 ``/api/bind``                            POST    绑定 Node ID / Secret 并热重连
+``/api/ollama/tags``                    GET     本机 Ollama 已装模型 + 在线状态
+``/api/ollama/recommended``             GET     云端推荐模型列表（免命令行选型）
+``/api/ollama/pull``                    POST    免命令行拉取模型（后台线程）
+``/api/ollama/bind``                    POST    设为当前接单模型（写盘生效）
 ======================================  ======  ====================================
 
 让退语义
@@ -56,6 +60,13 @@ from pydantic import BaseModel, Field
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
 import inference_backend
+from ollama_local import (
+    DEFAULT_OLLAMA_BASE_URL,
+    OllamaError,
+    PullManager,
+    list_local_models,
+    validate_model_name,
+)
 from telemetry import collect_gpu_metrics_cached, get_reporter
 from token_counter import build_usage, count_prompt_tokens, count_tokens
 from web_ui import UI_HTML
@@ -122,6 +133,18 @@ class PrefsRequest(BaseModel):
 
     backend_model: Optional[str] = Field(default=None, max_length=256)
     force_idle: Optional[bool] = None
+
+
+class OllamaPullRequest(BaseModel):
+    """免命令行拉取本机模型（阶段十三 P2）。"""
+
+    model: str = Field(default="", max_length=256)
+
+
+class OllamaBindRequest(BaseModel):
+    """把本机某个模型设为当前接单模型（阶段十三 P2）。"""
+
+    model: str = Field(default="", max_length=256)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -482,6 +505,165 @@ def create_app() -> FastAPI:
                 "message": "已保存并生效",
             },
         )
+
+    # ── 阶段十三 P2：免命令行 Ollama 模型管理 ──────────────────────
+    # 拉取管理器挂在 app 实例上（每个 app 一个 ⇒ 测试之间互不干扰）
+    pull_manager = PullManager()
+
+    def _persist_serving_model(model: str) -> Dict[str, Any]:
+        """把模型写成**当前接单模型**（``backend_model`` + ``model_name``）。
+
+        - ``backend_model``：本地推理引擎用的 tag（Ollama/vLLM 都认）；
+        - ``model_name``：**对外声明**的服务模型 —— 云端据此把本节点挂到
+          该模型名下（阶段七 P1 的自动对齐链路），不改的话派单永远匹配不上。
+
+        ⚠️ 写盘失败必须让调用方看到（回 500），不能静默 —— 否则用户以为
+        换好了模型，结果下次派单还是旧模型。
+        """
+        cfg.update(backend_model=model, model_name=model)
+        try:
+            inference_backend.reset_backend_cache()
+        except Exception as exc:  # noqa: BLE001 - 缓存重置失败不致命
+            print(f"[agent] 重置推理后端缓存失败: {exc}")
+        return {"backend_model": cfg.backend_model, "model_name": cfg.model_name}
+
+    @app.get("/api/ollama/tags")
+    def api_ollama_tags() -> Dict[str, Any]:
+        """本机 Ollama 已装模型 + 在线状态 + 当前拉取进度。
+
+        ⚠️ **Ollama 没起来不算错误** —— 返回 ``online=False`` + 原因，
+        面板据此显示"本机没装 Ollama"而不是一片红。
+        """
+        base_url = str(cfg.backend_base_url or DEFAULT_OLLAMA_BASE_URL)
+        info = list_local_models(base_url)
+        return {
+            "ok": True,
+            "online": bool(info.get("online")),
+            "base_url": base_url,
+            "models": info.get("models") or [],
+            "error": str(info.get("error") or ""),
+            "pull": pull_manager.status(),
+            "current_model": str(cfg.backend_model or ""),
+            "declared_model": str(cfg.model_name or ""),
+            "agent_version": AGENT_VERSION,
+        }
+
+    @app.get("/api/ollama/recommended")
+    async def api_ollama_recommended() -> JSONResponse:
+        """云端推荐模型列表（阶段十三 P2 · ``/api/v1/network/recommended-models``）。
+
+        走 Agent 代理而不是浏览器直连：云端地址在配置里，浏览器直连会踩
+        CORS，且面板在无公网的机器上也要能看。
+        """
+        base = str(cfg.cloud_api_base or "").rstrip("/")
+        if not base:
+            return JSONResponse(status_code=200, content={
+                "ok": False, "models": [], "count": 0,
+                "error": "未配置云端地址（cloud_api_base）",
+            })
+        url = base + "/api/v1/network/recommended-models"
+
+        def _fetch() -> Dict[str, Any]:
+            import urllib.request
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            return json.loads(raw)
+
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+        except Exception as exc:  # noqa: BLE001 - 云端不可达不该让面板挂掉
+            return JSONResponse(status_code=200, content={
+                "ok": False, "models": [], "count": 0,
+                "error": "读取云端推荐列表失败：%s" % exc,
+            })
+        items = data.get("models") if isinstance(data, dict) else None
+        return JSONResponse(status_code=200, content={
+            "ok": True,
+            "models": items or [],
+            "count": len(items or []),
+            "error": "",
+        })
+
+    @app.post("/api/ollama/pull")
+    async def api_ollama_pull(req: OllamaPullRequest) -> JSONResponse:
+        """**免命令行**拉取本机模型（阶段十三 P2）。
+
+        流程：校验模型名 → 后台线程调本机 Ollama ``/api/pull`` →
+        拉完自动把 ``backend_model`` / ``model_name`` 写进配置文件。
+
+        ⚠️ 拉取是**后台线程**：几百 MB 的下载绝不能占住事件循环，否则
+        本机 ``/health`` 会被拖死、面板会超时。
+        """
+        try:
+            model = validate_model_name(req.model)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={
+                "ok": False, "started": False, "message": str(exc)})
+        base_url = str(cfg.backend_base_url or DEFAULT_OLLAMA_BASE_URL)
+
+        def _on_success(pulled: str) -> None:
+            # 落盘由**端点层**做（不是 ollama_local 模块）——
+            # 这样单测可以注入临时配置，绝不污染真机 agent.config.json。
+            try:
+                _persist_serving_model(pulled)
+                print("[ollama] 已拉取 %s 并设为当前接单模型" % pulled)
+            except Exception as exc:  # noqa: BLE001 - 落盘失败不影响拉取结论
+                print("[ollama] 拉取成功但写入配置失败: %s" % exc)
+
+        try:
+            result = pull_manager.start(model, base_url=base_url,
+                                        on_success=_on_success)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={
+                "ok": False, "started": False, "message": str(exc)})
+        except OllamaError as exc:
+            return JSONResponse(status_code=502, content={
+                "ok": False, "started": False, "message": str(exc)})
+        if not result.get("started"):
+            reason = str(result.get("reason") or "")
+            return JSONResponse(status_code=409, content={
+                "ok": False, "started": False, "model": model,
+                "message": ("已有拉取任务在进行中，请稍候"
+                            if reason == "busy" else "拉取未启动"),
+                "pull": pull_manager.status()})
+        return JSONResponse(status_code=200, content={
+            "ok": True, "started": True, "model": model,
+            "message": "已开始拉取 %s，可在本页查看进度" % model,
+            "pull": pull_manager.status()})
+
+    @app.post("/api/ollama/bind")
+    async def api_ollama_bind(req: OllamaBindRequest) -> JSONResponse:
+        """把**本机已装**的模型设为当前接单模型（不下载，立刻生效）。"""
+        try:
+            model = validate_model_name(req.model)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={
+                "ok": False, "message": str(exc)})
+        base_url = str(cfg.backend_base_url or DEFAULT_OLLAMA_BASE_URL)
+        info = list_local_models(base_url)
+        installed = {str(m.get("name") or "") for m in (info.get("models") or [])}
+        # Ollama 会在 tags 里返回 `name:tag`，也可能是裸 `name` —— 两种都认
+        if model not in installed and model.split(":")[0] not in installed:
+            if not info.get("online"):
+                return JSONResponse(status_code=503, content={
+                    "ok": False,
+                    "message": "本机 Ollama 未运行（%s），无法确认模型是否已装"
+                               % (info.get("error") or "未连接")})
+            return JSONResponse(status_code=400, content={
+                "ok": False,
+                "message": "本机未安装该模型，请先「一键拉取并绑定」"})
+        try:
+            saved = _persist_serving_model(model)
+        except Exception as exc:  # noqa: BLE001 - 写盘失败必须回显
+            return JSONResponse(status_code=500, content={
+                "ok": False, "message": "配置保存失败：%s" % exc})
+        return JSONResponse(status_code=200, content={
+            "ok": True, "model": model,
+            "backend_model": saved.get("backend_model"),
+            "model_name": saved.get("model_name"),
+            "message": "已设为当前接单模型，下一次派单立即生效"})
 
     return app
 

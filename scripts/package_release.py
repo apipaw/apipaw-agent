@@ -64,6 +64,8 @@ RUNTIME_MODULES: Tuple[str, ...] = (
     "dispatch_crypto.py",
     # v1.0.7（阶段六 P0 · 模块 A）：统一推理后端抽象层 —— ws_tunnel / main 必依赖它
     "inference_backend.py",
+    # v1.0.13（阶段十三 P2）：本机 Ollama 模型管理（免命令行拉取）—— main 必依赖它
+    "ollama_local.py",
 )
 
 # 一键脚本：Windows 用户主要用这三个

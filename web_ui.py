@@ -316,6 +316,57 @@ UI_HTML = r"""<!DOCTYPE html>
     font-family: "Cascadia Mono", Consolas, monospace;
     font-size: 11.5px;
   }
+
+  /* 阶段十三 P2：Ollama 模型管理区 */
+  .ollama-list {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ollama-item {
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(4, 9, 20, 0.55);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .ollama-item.active { border-color: rgba(53, 240, 160, .5); }
+
+  .ollama-info { flex: 1; min-width: 0; }
+
+  .ollama-name {
+    font-size: 13px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    color: var(--text);
+    word-break: break-all;
+  }
+
+  .ollama-meta {
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--muted);
+    word-break: break-all;
+  }
+
+  button.mini {
+    flex: none;
+    padding: 7px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: rgba(53, 224, 255, 0.08);
+    color: var(--cyan-dim);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background .2s, color .2s;
+  }
+
+  button.mini:hover:not(:disabled) { background: rgba(53, 224, 255, 0.16); color: var(--cyan); }
+  button.mini:disabled { opacity: .5; cursor: progress; }
 </style>
 </head>
 <body>
@@ -367,6 +418,17 @@ UI_HTML = r"""<!DOCTYPE html>
 
         <button class="primary" id="savePrefs">保存运行偏好</button>
         <div class="status" id="prefsStatus">偏好未改动</div>
+      </div>
+
+      <!-- 阶段十三 P2：免命令行 Ollama 模型管理 -->
+      <div class="section">
+        <div class="section-title">本地 Ollama 模型管理 · 云端推荐一键同步</div>
+        <div class="status" id="ollamaStatus">检测本机 Ollama…</div>
+        <div class="ollama-list" id="localModels"></div>
+
+        <div class="section-title" style="margin-top:20px">云端推荐模型</div>
+        <div class="status" id="recStatus">读取云端推荐列表…</div>
+        <div class="ollama-list" id="recModels"></div>
       </div>
 
       <div class="status" id="status">等待绑定…</div>
@@ -525,8 +587,218 @@ UI_HTML = r"""<!DOCTYPE html>
       .finally(function () { savePrefsEl.disabled = false; });
   });
 
+  // ── 阶段十三 P2：免命令行 Ollama 模型管理 ──
+  // 本机已装模型 + 云端推荐列表，一键「拉取并绑定」/「设为当前接单模型」。
+  var ollamaStatusEl = $("ollamaStatus"), localModelsEl = $("localModels");
+  var recStatusEl = $("recStatus"), recModelsEl = $("recModels");
+  var pullTimer = null;
+  var installedNames = {};
+  var lastPullState = "";
+
+  function sayOllama(text, kind) {
+    ollamaStatusEl.textContent = text;
+    ollamaStatusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function sayRec(text, kind) {
+    recStatusEl.textContent = text;
+    recStatusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function fmtSize(bytes) {
+    var n = Number(bytes || 0);
+    if (!n) { return ""; }
+    if (n >= 1073741824) { return (n / 1073741824).toFixed(2) + " GB"; }
+    if (n >= 1048576) { return (n / 1048576).toFixed(1) + " MB"; }
+    return Math.round(n / 1024) + " KB";
+  }
+
+  function mkBtn(text, disabled, onClick) {
+    var btn = document.createElement("button");
+    btn.className = "mini";
+    btn.textContent = text;
+    btn.disabled = !!disabled;
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  function bindModel(model, btn) {
+    btn.disabled = true;
+    fetch("/api/ollama/bind", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: model })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.body || !res.body.ok) {
+          sayOllama((res.body && res.body.message) || "绑定失败", "err");
+          btn.disabled = false;
+          return;
+        }
+        sayOllama("已设为当前接单模型：" + model + "（下一次派单立即生效）", "ok");
+        loadOllama();
+      })
+      .catch(function (e) { sayOllama("请求失败：" + e.message, "err"); btn.disabled = false; });
+  }
+
+  function pullModel(model, btn) {
+    btn.disabled = true;
+    sayOllama("已触发拉取 " + model + "（后台下载，可离开本页）…", "wait");
+    fetch("/api/ollama/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: model })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.body || !res.body.ok) {
+          sayOllama((res.body && res.body.message) || "拉取失败", "err");
+          btn.disabled = false;
+          return;
+        }
+        sayOllama("正在拉取 " + model + "…", "wait");
+        startPullPoll();
+      })
+      .catch(function (e) { sayOllama("请求失败：" + e.message, "err"); btn.disabled = false; });
+  }
+
+  function startPullPoll() {
+    if (pullTimer) { clearInterval(pullTimer); }
+    pullTimer = setInterval(function () {
+      loadOllama();
+    }, 2500);
+  }
+
+  function renderLocal(models, current) {
+    localModelsEl.innerHTML = "";
+    installedNames = {};
+    if (!models.length) {
+      var empty = document.createElement("div");
+      empty.className = "ollama-item";
+      var ei = document.createElement("div");
+      ei.className = "ollama-info";
+      var en = document.createElement("div");
+      en.className = "ollama-name";
+      en.textContent = "本机暂无已装模型";
+      var em = document.createElement("div");
+      em.className = "ollama-meta";
+      em.textContent = "从下方「云端推荐模型」一键拉取即可";
+      ei.appendChild(en);
+      ei.appendChild(em);
+      empty.appendChild(ei);
+      localModelsEl.appendChild(empty);
+      return;
+    }
+    models.forEach(function (m) {
+      var name = String(m.name || "");
+      if (!name) { return; }
+      installedNames[name] = true;
+      var isCur = (name === current);
+      var row = document.createElement("div");
+      row.className = "ollama-item" + (isCur ? " active" : "");
+      var info = document.createElement("div");
+      info.className = "ollama-info";
+      var nm = document.createElement("div");
+      nm.className = "ollama-name";
+      nm.textContent = name + (isCur ? "  · 当前接单模型" : "");
+      var meta = document.createElement("div");
+      meta.className = "ollama-meta";
+      meta.textContent = [
+        m.parameter_size || "",
+        m.family || "",
+        fmtSize(m.size)
+      ].filter(Boolean).join(" · ");
+      info.appendChild(nm);
+      info.appendChild(meta);
+      row.appendChild(info);
+      row.appendChild(mkBtn(isCur ? "当前模型" : "设为当前接单模型", isCur, function () {
+        bindModel(name, this);
+      }));
+      localModelsEl.appendChild(row);
+    });
+  }
+
+  function loadOllama() {
+    return fetch("/api/ollama/tags", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var models = d.models || [];
+        var pull = d.pull || {};
+        if (d.online) {
+          sayOllama("本机 Ollama 在线（" + (d.base_url || "") + "）· 已装 " + models.length + " 个模型", "ok");
+        } else {
+          sayOllama("本机 Ollama 未运行：" + (d.error || "未连接 127.0.0.1:11434") + "（装好 Ollama 后自动识别）", "err");
+        }
+        if (pull.state === "running") {
+          sayOllama("正在拉取 " + (pull.model || "") + "：" + (pull.status || "…") +
+                    "（" + (pull.completed || 0) + "/" + (pull.total || 0) + "）", "wait");
+          startPullPoll();
+        } else if (pull.state === "error" && pull.state !== lastPullState) {
+          sayOllama("拉取失败：" + (pull.error || "未知错误"), "err");
+        } else if (pull.state === "done" && pull.state !== lastPullState) {
+          sayOllama("拉取完成：" + (pull.model || "") + "（已自动设为当前接单模型）", "ok");
+        }
+        lastPullState = String(pull.state || "");
+        renderLocal(models, String(d.current_model || ""));
+      })
+      .catch(function (e) { sayOllama("读取本机模型失败：" + e.message, "err"); });
+  }
+
+  function loadRecommended() {
+    return fetch("/api/ollama/recommended", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var items = d.models || [];
+        if (!d.ok) { sayRec(d.error || "读取云端推荐列表失败", "err"); return; }
+        recModelsEl.innerHTML = "";
+        if (!items.length) {
+          sayRec("云端暂未上架推荐模型", "wait");
+          return;
+        }
+        sayRec("云端推荐 " + items.length + " 个模型（在线供应多的排前面）", "ok");
+        items.forEach(function (m) {
+          var mid = String(m.model_id || "");
+          if (!mid) { return; }
+          var row = document.createElement("div");
+          row.className = "ollama-item";
+          var info = document.createElement("div");
+          info.className = "ollama-info";
+          var nm = document.createElement("div");
+          nm.className = "ollama-name";
+          nm.textContent = String(m.display_name || mid);
+          var meta = document.createElement("div");
+          meta.className = "ollama-meta";
+          meta.textContent = [
+            mid,
+            "在线节点 " + (m.online_nodes || 0),
+            "最低显存 " + (m.min_vram_gb || 0) + "GB",
+            "输入 $" + (m.prompt_price_per_1k || 0) + "/1k",
+            "输出 $" + (m.completion_price_per_1k || 0) + "/1k"
+          ].join(" · ");
+          info.appendChild(nm);
+          info.appendChild(meta);
+          row.appendChild(info);
+          if (installedNames[mid]) {
+            row.appendChild(mkBtn("设为当前接单模型", false, function () {
+              bindModel(mid, this);
+            }));
+          } else {
+            row.appendChild(mkBtn("一键拉取并绑定", false, function () {
+              pullModel(mid, this);
+            }));
+          }
+          recModelsEl.appendChild(row);
+        });
+      })
+      .catch(function (e) { sayRec("读取云端推荐列表失败：" + e.message, "err"); });
+  }
+
   refresh();
   setInterval(refresh, 5000);
+  loadOllama();
+  loadRecommended();
+  setInterval(function () { loadOllama(); loadRecommended(); }, 15000);
 })();
 </script>
 </body>

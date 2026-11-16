@@ -60,6 +60,15 @@ CONFIG_FILE_NAME = "agent.config.json"
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
+# v1.0.13（阶段十三 P2）：**免命令行一键拉取 Ollama 模型** ——
+#   新增 ``/api/ollama/tags``（本机已装模型 + 在线状态 + 拉取进度）、
+#   ``/api/ollama/recommended``（云端推荐模型列表代理）、
+#   ``/api/ollama/pull``（后台线程拉取，成功后自动写盘
+#   ``backend_model`` + ``model_name``）与 ``/api/ollama/bind``
+#   （设为当前接单模型）；面板新增「本地 Ollama 模型管理」区块。
+#   ⚠️ 拉取走**后台线程**（几百 MB 下载绝不能占住事件循环）；
+#   ⚠️ 模型名**严格白名单**校验（防路径穿越 / 参数注入）；
+#   ⚠️ **只跟本机 127.0.0.1 说话**，绝不外呼（本机模块不含凭证）。
 # v1.0.12（阶段八 P0/P2）：
 #   ① **根治 AgentConfig 单例污染缺陷**：显式传 ``config_path`` 时返回
 #      **独立实例**（老实现里 ``__new__`` 无视构造参数，永远返回单例 ⇒
@@ -80,7 +89,7 @@ CONFIG_FILE_NAME = "agent.config.json"
 #   ``auto`` 探测支持多引擎（Ollama 优先，OpenAI 兼容引擎需**显式配置地址**
 #   才进候选，避免误认本机其它 HTTP 服务）；DONE 帧新增 ``perf``
 #   （节点自测的 TTFT / 吐字速度），云端据此用**真实**性能口径。
-AGENT_VERSION = "1.0.12"
+AGENT_VERSION = "1.0.13"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

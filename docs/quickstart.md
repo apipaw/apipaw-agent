@@ -1,5 +1,13 @@
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** The panel now **fills itself in from the link**: open `http://127.0.0.1:52415/ui?node_id=your-node&node_secret=your-secret` and the Node ID and Node Secret are already in the boxes — just click **"绑 定 节 点"**. That link is what the owner console hands out when it issues a credential in one click, so "get a credential → start the node" is now a copy-and-paste instead of a transcription job. The secret is wiped from the address bar as soon as it is read, so it does not linger in your browser history.
+
+**[CN]** 面板现在**能从链接自动填好**：打开 `http://127.0.0.1:52415/ui?node_id=你的节点&node_secret=你的密钥`，Node ID 与 Node Secret 已经填在框里了，点「绑 定 节 点」即可。业主控制台一键签发凭证时给出的正是这条链接 —— 于是「拿到凭证 → 启动节点」从**手抄**变成了**复制粘贴**。密钥一读入即从地址栏抹掉，不会留在浏览器历史里。
+
+**[EN]** A configuration file can no longer be silently overwritten by accident: the node's settings live in exactly one place (`agent.config.json`), and any tool that asks for a *different* settings file now gets its own private copy instead of quietly writing over your real one.
+
+**[CN]** 配置文件不会再被**静默改写**：节点的配置只有一份（`agent.config.json`），任何工具想要**另一份**配置时，现在会拿到属于自己的独立副本，而不是悄悄把你真实的那份覆盖掉。
+
 **[EN]** Your machine now **tells the cloud which models it can actually serve** — every heartbeat and every live connection carries the local model list plus the exact engine tag (an Ollama tag, or a vLLM / llama.cpp model name). The cloud merges that into the node registry **by itself**, so a freshly connected node shows up as *model-serving* right away. Until now you had to ask the platform to bind the models by hand for every single machine; that chore is gone. A node that reports an **empty** list is treated as "confirmed: no engine here" and is skipped for inference work, while a node that reports nothing at all keeps working as before.
 
 **[CN]** 您的机器现在会**主动告诉云端自己到底能跑哪些模型**——每次心跳与每条长连接都会带上本地模型清单和引擎 tag（Ollama tag，或 vLLM / llama.cpp 的模型名）。云端据此**自动合并**进节点注册表，新接入的节点立刻就能被派发推理任务。此前每台新机器都要**手工**跑脚本绑模型，这件苦差事已经没有了。上报**空清单**的节点会被判定为「确认没有推理引擎」而不再参与派单；**完全不上报**的老节点行为不变，照常接单。

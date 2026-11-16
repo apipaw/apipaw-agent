@@ -60,14 +60,11 @@ def _record(name: str, ok: bool, detail: str = "") -> None:
 def _make_config(tmp_dir: str):
     """造一份指向临时文件的配置实例（**不碰用户真实的 agent.config.json**）。
 
-    ⚠️ ``AgentConfig`` 是**单例**（``__new__`` 里带 ``_initialized`` 闸门），
-    直接 ``AgentConfig(config_path=...)`` 会被单例吞掉、仍然指向仓库里的
-    真实配置文件 —— 那会**改写用户的线上配置**。这里绕过 ``__new__`` 造一个
-    独立实例，再把模块级单例指针指过去。
+    阶段八 P0 起，``AgentConfig`` 显式传 ``config_path`` 即返回**独立实例**
+    （不再被单例吞掉、绝不改写真机配置）。
     """
     path = Path(tmp_dir) / "agent.config.json"
-    cfg = object.__new__(agent_config.AgentConfig)
-    agent_config.AgentConfig.__init__(cfg, config_path=path)
+    cfg = agent_config.AgentConfig(config_path=path)
     return cfg, path
 
 

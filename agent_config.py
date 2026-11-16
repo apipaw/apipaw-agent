@@ -60,6 +60,15 @@ CONFIG_FILE_NAME = "agent.config.json"
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
+# v1.0.12（阶段八 P0/P2）：
+#   ① **根治 AgentConfig 单例污染缺陷**：显式传 ``config_path`` 时返回
+#      **独立实例**（老实现里 ``__new__`` 无视构造参数，永远返回单例 ⇒
+#      ``AgentConfig(config_path=tmp)`` 被静默吞掉，``update()`` 直接改写
+#      **用户真实的** ``agent.config.json``，且**无任何报错**）；
+#      另增 ``AgentConfig.reset_instance()`` 供测试丢弃单例；
+#   ② 面板支持 **URL 参数预填** ``?node_id=xxx&node_secret=yyy``
+#      （控制台「一键新增算力节点」的凭证弹窗给出该链接，点开即填好；
+#      填完即从地址栏抹掉明文密钥，不留在浏览器历史里）。
 # v1.0.11（阶段七 P1/P2）：
 #   ① 心跳/WS 帧上报**本地模型清单** ``models`` + ``backend_model`` +
 #      ``inference_backend``（HTTP 通道此前只带 ``model_name`` ⇒ 云端
@@ -71,7 +80,7 @@ CONFIG_FILE_NAME = "agent.config.json"
 #   ``auto`` 探测支持多引擎（Ollama 优先，OpenAI 兼容引擎需**显式配置地址**
 #   才进候选，避免误认本机其它 HTTP 服务）；DONE 帧新增 ``perf``
 #   （节点自测的 TTFT / 吐字速度），云端据此用**真实**性能口径。
-AGENT_VERSION = "1.0.11"
+AGENT_VERSION = "1.0.12"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -180,26 +189,51 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 class AgentConfig:
     """
-    线程安全的配置管理器（单例）。
+    线程安全的配置管理器。
 
-    典型用法::
+    默认用法是**单例**（``get_config()`` 全局共享一份）::
 
         from agent_config import get_config
         cfg = get_config()
         cfg.update(node_name="my-node", wallet_address="0x...")
         print(cfg.port)
+
+    ⚠️ **显式传入 ``config_path`` ⇒ 返回独立实例（不共享单例）**。
+
+    背景（阶段八 P0 修掉的单例污染缺陷）：老实现里 ``__new__`` 无视构造
+    参数、永远返回同一个单例，于是 ``AgentConfig(config_path=tmp)`` 会被
+    **静默吞掉**，``update()`` 直接改写到**用户真实的**
+    ``agent.config.json``（实测把真机配置的 ``force_idle`` /
+    ``backend_model`` 冲掉了）。这类污染在测试里尤其致命 —— 跑一次单测
+    就把生产/本机的真实配置改了，且**无任何报错**。
+
+    现在的契约：
+
+    - ``AgentConfig()`` / ``get_config()`` ⇒ 单例，路径 = 仓库内
+      ``agent.config.json``（行为与旧版完全一致）；
+    - ``AgentConfig(config_path=X)`` ⇒ **独立实例**，读写都只发生在 ``X``；
+      与单例互不影响，也**绝不会**碰真机配置；
+    - ``AgentConfig.reset_instance()`` ⇒ 测试用：丢弃当前单例，
+      让下一次 ``get_config()`` 重新从默认路径加载。
     """
 
     _instance: Optional["AgentConfig"] = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> "AgentConfig":
-        # 接受并忽略构造参数：单例只允许第一次调用决定配置路径
+    def __new__(cls, config_path: Optional[Path] = None, *args: Any, **kwargs: Any) -> "AgentConfig":
+        # ⚠️ 显式给了路径 ⇒ **独立实例**（绝不复用/污染全局单例）
+        if config_path is not None:
+            instance = super().__new__(cls)
+            instance._initialized = False
+            instance._isolated = True
+            return instance
+        # 无参 ⇒ 经典单例（第一次调用决定配置路径）
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
                     instance = super().__new__(cls)
                     instance._initialized = False
+                    instance._isolated = False
                     cls._instance = instance
         return cls._instance
 
@@ -211,6 +245,22 @@ class AgentConfig:
         self._model = self._build_default_model()
         self._initialized = True
         self._load_or_create()
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """丢弃当前单例（**仅测试用**）。
+
+        让下一次 ``get_config()`` / ``AgentConfig()`` 重新从默认路径加载，
+        避免测试之间互相污染。生产代码不应调用。
+
+        ⚠️ 本模块有**两级缓存**：类属性 ``AgentConfig._instance`` 与模块级
+        ``_config_instance``（``get_config()`` 用它）。两者都要清，
+        否则清了一半仍然拿回旧实例。
+        """
+        global _config_instance
+        with cls._instance_lock:
+            cls._instance = None
+        _config_instance = None
 
     # ───────────────────────── 内部工具 ─────────────────────────
 

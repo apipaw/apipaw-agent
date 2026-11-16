@@ -401,6 +401,36 @@ UI_HTML = r"""<!DOCTYPE html>
     connText.textContent = connected ? "云端连接：已连接" : "云端连接：未连接";
   }
 
+  // ── 阶段八 P2：URL 参数预填（?node_id=xxx&node_secret=yyy）──
+  // 控制台「一键新增算力节点」的凭证弹窗会给出这样一条链接，点开即自动填好，
+  // 用户只需点「绑定节点」即可，不必手抄。
+  // ⚠️ 只在**参数存在**时填；已填好的输入框不覆盖（避免轮询/重复打开丢内容）。
+  // ⚠️ 不把 secret 写进控制台日志、不上报任何遥测（密钥只在本地表单里）。
+  (function prefillFromQuery() {
+    var params;
+    try {
+      params = new URLSearchParams(window.location.search || "");
+    } catch (e) {
+      return;
+    }
+    var qid = (params.get("node_id") || "").trim();
+    var qsec = (params.get("node_secret") || "").trim();
+    if (qid && !nodeIdEl.value) {
+      nodeIdEl.value = qid;
+      say("已从链接预填 Node ID，点「绑定节点」即可生效。", "ok");
+    }
+    if (qsec && !secretEl.value) {
+      secretEl.value = qsec;
+    }
+    // 顺手清掉地址栏里的明文密钥（避免留在浏览器历史里）
+    if (qid || qsec) {
+      try {
+        var clean = window.location.pathname + window.location.hash;
+        window.history.replaceState({}, document.title, clean);
+      } catch (e) {}
+    }
+  })();
+
   function refresh() {
     return fetch("/api/status", { cache: "no-store" })
       .then(function (r) { return r.json(); })

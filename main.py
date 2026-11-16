@@ -111,6 +111,19 @@ class BindRequest(BaseModel):
     node_secret: str = Field(default="", max_length=512)
 
 
+class PrefsRequest(BaseModel):
+    """本地配置面板的**运行偏好**（阶段七 P2）。
+
+    - ``backend_model``：本地推理模型（Ollama tag / vLLM 模型名）。
+      留空 = 跟随派单载荷。
+    - ``force_idle``：强制待命模式（忽略键鼠活动，全天候接单）。
+      勾上即**立即生效**（yield_monitor 每次判定都重读配置），无需重启。
+    """
+
+    backend_model: Optional[str] = Field(default=None, max_length=256)
+    force_idle: Optional[bool] = None
+
+
 # ──────────────────────────────────────────────────────────────
 # 应用装配
 # ──────────────────────────────────────────────────────────────
@@ -353,6 +366,10 @@ def create_app() -> FastAPI:
             "ws_connected": is_ws_connected(),
             "state": monitor.state.name,
             "agent_version": AGENT_VERSION,
+            # 阶段七 P2：面板要预填这两项（强制待命勾选状态 / 本地推理模型）
+            "force_idle": bool(cfg.force_idle),
+            "backend_model": str(cfg.backend_model or ""),
+            "inference_backend": str(cfg.inference_backend or ""),
             "timestamp": int(time.time()),
         }
 
@@ -414,6 +431,55 @@ def create_app() -> FastAPI:
                     if connected
                     else "配置已保存，正在用新凭证重新连接云端…"
                 ),
+            },
+        )
+
+    # ── /api/prefs ── 运行偏好：本地推理模型 + 强制待命（阶段七 P2）──
+    @app.post("/api/prefs")
+    async def api_prefs(req: PrefsRequest) -> JSONResponse:
+        """保存运行偏好并**立即生效**（不必重启、不必改 start.bat）。
+
+        - ``backend_model``：本地推理模型 tag；改了之后重置推理后端缓存，
+          下一次派单立刻用新模型（否则后端对象还锁在旧模型上）。
+        - ``force_idle``：强制待命模式；``yield_monitor`` 每次判定都重读配置，
+          因此勾上后**下一次状态轮询**就生效。
+        """
+        updates: Dict[str, Any] = {}
+        if req.backend_model is not None:
+            updates["backend_model"] = str(req.backend_model).strip()
+        if req.force_idle is not None:
+            updates["force_idle"] = bool(req.force_idle)
+
+        if not updates:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "message": "没有需要保存的偏好项"},
+            )
+
+        try:
+            cfg.update(**updates)
+        except Exception as exc:  # noqa: BLE001 - 写盘失败必须回显给用户
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "message": f"配置保存失败：{exc}"},
+            )
+
+        # 换了本地模型 ⇒ 推理后端缓存里的旧对象不再适用，重置它
+        if "backend_model" in updates:
+            try:
+                inference_backend.reset_backend_cache()
+            except Exception as exc:  # noqa: BLE001 - 缓存重置失败不致命
+                print(f"[agent] 重置推理后端缓存失败: {exc}")
+
+        monitor = get_yield_monitor()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "backend_model": cfg.backend_model,
+                "force_idle": bool(cfg.force_idle),
+                "state": monitor.state.name,
+                "message": "已保存并生效",
             },
         )
 

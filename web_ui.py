@@ -265,6 +265,49 @@ UI_HTML = r"""<!DOCTYPE html>
     color: rgba(143, 163, 192, 0.75);
   }
 
+  /* 阶段七 P2：运行偏好区 */
+  .section {
+    margin-top: 26px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+  }
+
+  .section-title {
+    font-size: 12px;
+    letter-spacing: 1.6px;
+    text-transform: uppercase;
+    color: var(--cyan-dim);
+    margin-bottom: 14px;
+  }
+
+  label.check {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 0;
+    font-size: 13px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  label.check input {
+    margin-top: 2px;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--cyan);
+    cursor: pointer;
+  }
+
+  .check-desc {
+    display: block;
+    margin-top: 4px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+
   code {
     padding: 1px 5px;
     border-radius: 4px;
@@ -302,6 +345,30 @@ UI_HTML = r"""<!DOCTYPE html>
 
       <button class="primary" id="submit">绑 定 节 点</button>
 
+      <div class="section">
+        <div class="section-title">运行偏好</div>
+
+        <div class="field">
+          <label for="backendModel">本地推理模型（backend_model）</label>
+          <input id="backendModel" type="text" placeholder="例如 qwen2.5:0.5b（留空 = 跟随派单载荷）" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label class="check" for="forceIdle">
+            <input id="forceIdle" type="checkbox" />
+            <span>
+              强制待命模式（忽略键鼠活动全天候接单）
+              <span class="check-desc">
+                勾上后节点永远处于「挂机中」，即使你正在用键盘鼠标 —— 保存即生效，不必重启。
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <button class="primary" id="savePrefs">保存运行偏好</button>
+        <div class="status" id="prefsStatus">偏好未改动</div>
+      </div>
+
       <div class="status" id="status">等待绑定…</div>
 
       <div class="meta">
@@ -321,6 +388,8 @@ UI_HTML = r"""<!DOCTYPE html>
   var $ = function (id) { return document.getElementById(id); };
   var nodeIdEl = $("nodeId"), secretEl = $("nodeSecret"), statusEl = $("status");
   var submitEl = $("submit"), toggleEl = $("toggle"), dotEl = $("dot"), connText = $("connText");
+  var backendModelEl = $("backendModel"), forceIdleEl = $("forceIdle");
+  var savePrefsEl = $("savePrefs"), prefsStatusEl = $("prefsStatus");
 
   function say(text, kind) {
     statusEl.textContent = text;
@@ -339,6 +408,13 @@ UI_HTML = r"""<!DOCTYPE html>
         setConn(!!s.ws_connected);
         if (!nodeIdEl.value && s.node_id) { nodeIdEl.value = s.node_id; }
         if (s.agent_version) { $("ver").textContent = "Agent v" + s.agent_version; }
+        // 阶段七 P2：预填运行偏好（只在用户没改过的时候覆盖，避免轮询打断输入）
+        if (typeof s.backend_model === "string" && !backendModelEl.dataset.touched) {
+          backendModelEl.value = s.backend_model;
+        }
+        if (typeof s.force_idle === "boolean" && !forceIdleEl.dataset.touched) {
+          forceIdleEl.checked = s.force_idle;
+        }
         return s;
       })
       .catch(function () { setConn(false); });
@@ -382,6 +458,41 @@ UI_HTML = r"""<!DOCTYPE html>
         say("请求失败：" + e.message, "err");
       })
       .finally(function () { submitEl.disabled = false; });
+  });
+
+  // ── 运行偏好（阶段七 P2）：保存即生效 ──
+  function sayPrefs(text, kind) {
+    prefsStatusEl.textContent = text;
+    prefsStatusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  backendModelEl.addEventListener("input", function () { backendModelEl.dataset.touched = "1"; });
+  forceIdleEl.addEventListener("change", function () { forceIdleEl.dataset.touched = "1"; });
+
+  savePrefsEl.addEventListener("click", function () {
+    savePrefsEl.disabled = true;
+    sayPrefs("正在保存…", "wait");
+
+    fetch("/api/prefs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        backend_model: (backendModelEl.value || "").trim(),
+        force_idle: !!forceIdleEl.checked
+      })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.body || !res.body.ok) {
+          sayPrefs((res.body && res.body.message) || "保存失败", "err");
+          return;
+        }
+        sayPrefs("已保存并生效（当前状态：" + (res.body.state || "-") + "）", "ok");
+      })
+      .catch(function (e) {
+        sayPrefs("请求失败：" + e.message, "err");
+      })
+      .finally(function () { savePrefsEl.disabled = false; });
   });
 
   refresh();

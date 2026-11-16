@@ -89,13 +89,26 @@ STATE_LABELS: Dict[NodeState, str] = {
 
 
 def is_force_idle_enabled() -> bool:
-    """``APIPAW_FORCE_IDLE=1`` 时强制把节点钉在 IDLE。
+    """强制把节点钉在 IDLE：**环境变量 ``APIPAW_FORCE_IDLE=1`` 或配置项
+    ``force_idle=true``**（二者任一为真即为真）。
 
     某些环境（控制台程序持续注入输入事件，例如前台运行的 Claude Code TUI）
     会让 ``GetLastInputInfo`` 的空闲时间恒为 0，节点将永远无法进入 IDLE，
-    云端也就无法派单。该开关 **仅用于本地双端联调**，生产环境不要设置。
+    云端也就无法派单。
+
+    阶段七 P2：此前**只有环境变量** ⇒ 想开挂机模式必须手工改 ``start.bat``。
+    现在配置项 ``force_idle`` 可持久化、面板可勾选、**热生效**（每次判定都
+    重读配置单例），不用重启、不用改脚本。
+
+    ⚠️ 判定的读取路径必须是**容错**的：配置文件损坏 / pydantic 缺失时
+    一律回落到"不强制"，绝不因配置问题让节点起不来。
     """
-    return os.getenv("APIPAW_FORCE_IDLE", "").strip().lower() in ("1", "true", "yes", "on")
+    if os.getenv("APIPAW_FORCE_IDLE", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    try:
+        return bool(get_config().force_idle)
+    except Exception:  # noqa: BLE001 - 配置异常一律回落到"不强制"
+        return False
 
 
 def release_gpu_memory() -> bool:

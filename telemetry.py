@@ -244,7 +244,34 @@ class TelemetryReporter:
             "uptime_seconds": round(time.time() - _process_start_time(), 1),
             "timestamp": int(time.time()),
         }
+        # 阶段七 P1：**模型信息**必须随心跳上报。
+        # 此前 HTTP 心跳只带 ``model_name``，云端拿不到"本地到底装了哪些模型"
+        # ⇒ 只发 HTTP 心跳的节点永远 ``servable_models=0``，还得手工跑脚本绑模型。
+        # 这里补齐：``models``（本地可用清单，空数组 = 确认没有推理引擎）、
+        # ``backend_model``（本地引擎 tag）、``inference_backend``（后端类型）。
+        payload.update(self._model_payload(cfg))
         return payload
+
+    @staticmethod
+    def _model_payload(cfg: Any) -> Dict[str, Any]:
+        """采集本地模型信息（**任何异常都降级成空**，绝不让心跳失败）。"""
+        out: Dict[str, Any] = {
+            "models": [],
+            "backend_model": str(getattr(cfg, "backend_model", "") or ""),
+            "inference_backend": str(getattr(cfg, "inference_backend", "") or ""),
+        }
+        try:
+            import inference_backend as _ib
+            snapshot = _ib.describe_backend(cfg, probe_timeout_sec=1.0, use_cache=True)
+            models = snapshot.get("models") or []
+            cleaned = [str(m).strip() for m in models if str(m).strip()]
+            out["models"] = cleaned[:64]
+            active = str(snapshot.get("active") or "")
+            if active:
+                out["inference_backend"] = active
+        except Exception as exc:  # noqa: BLE001 - 模型探测失败不影响心跳
+            print(f"[telemetry] 读取本地模型清单失败（按空清单上报）: {exc}")
+        return out
 
     # ───────────────────────── 上报 ─────────────────────────
 

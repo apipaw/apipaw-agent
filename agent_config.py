@@ -60,12 +60,18 @@ CONFIG_FILE_NAME = "agent.config.json"
 # v1.0.5（阶段五 P3）：WS 隧道帧新增硬件显存上报（vram_total_gb / vram_used_gb /
 #   vram_free_gb / gpu_temp_c），云端据此判定节点能力等级（C0~C3）。
 #   帧内只增字段 ⇒ 老版本云端完全不受影响。
+# v1.0.11（阶段七 P1/P2）：
+#   ① 心跳/WS 帧上报**本地模型清单** ``models`` + ``backend_model`` +
+#      ``inference_backend``（HTTP 通道此前只带 ``model_name`` ⇒ 云端
+#      ``servable_models=0``，得手工跑脚本绑模型）；
+#   ② 新增**强制待命模式**配置项 ``force_idle``（可持久化、面板可勾选、
+#      热生效）—— 此前只能靠环境变量 ``APIPAW_FORCE_IDLE=1``（改 start.bat）。
 # v1.0.10（阶段六 P3 · 模块 A2）：OpenAI 兼容推理后端（vLLM / llama.cpp）**落地** ——
 #   新增 ``OpenAICompatBackend``（SSE 解析 + 真实 usage + 断流语义与 Ollama 同构）；
 #   ``auto`` 探测支持多引擎（Ollama 优先，OpenAI 兼容引擎需**显式配置地址**
 #   才进候选，避免误认本机其它 HTTP 服务）；DONE 帧新增 ``perf``
 #   （节点自测的 TTFT / 吐字速度），云端据此用**真实**性能口径。
-AGENT_VERSION = "1.0.10"
+AGENT_VERSION = "1.0.11"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -94,6 +100,11 @@ class AgentConfigModel(BaseModel):
     idle_threshold_seconds: float = Field(default=15.0, ge=0.5, le=3600.0)
     vram_yield_ms: int = Field(default=50, ge=10, le=5000)
     poll_interval_ms: int = Field(default=5, ge=1, le=1000)
+    # 阶段七 P2：**强制待命模式** —— 忽略键鼠活动，全天候接单。
+    # ⚠️ 此前只能靠环境变量 ``APIPAW_FORCE_IDLE=1``（改 start.bat 才能生效），
+    #    面板上改不了 ⇒ 挂机党必须手工编辑脚本。这里做成**可持久化配置项**，
+    #    面板勾选后立即生效（yield_monitor 每次判定都重读配置）。
+    force_idle: bool = False
 
     # ── 云端联动 ──────────────────────────────────────────
     cloud_api_base: str = "https://cloud.apipaw.com"
@@ -148,6 +159,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "idle_threshold_seconds": 15.0,
     "vram_yield_ms": 50,
     "poll_interval_ms": 5,
+    "force_idle": False,
     "cloud_api_base": "https://cloud.apipaw.com",
     "cloud_heartbeat_url": "https://cloud.apipaw.com/api/v1/nodes/heartbeat",
     "cloud_ws_url": "wss://cloud.apipaw.com/api/v1/node/stream",
@@ -361,6 +373,10 @@ class AgentConfig:
     @property
     def poll_interval_ms(self) -> int:
         return self._model.poll_interval_ms
+
+    @property
+    def force_idle(self) -> bool:
+        return bool(self._model.force_idle)
 
     @property
     def cloud_api_base(self) -> str:

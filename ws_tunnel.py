@@ -587,6 +587,10 @@ class WebSocketTunnel:
             # ⚠️ 只**增字段**，帧结构语义不变 ⇒ 老版本云端完全不受影响。
             "inference_backend": self._backend_label(),
             "models": self._local_models(),
+            # 阶段七 P1：把「对外声明的模型」与「本地引擎 tag」也报上去 ——
+            # 云端据此**自动合并**进注册表的模型清单（消灭手工绑模型的痛点）。
+            "model_name": str(getattr(self._cfg, "model_name", "") or ""),
+            "backend_model": str(getattr(self._cfg, "backend_model", "") or ""),
         }
 
     def _backend_label(self) -> str:

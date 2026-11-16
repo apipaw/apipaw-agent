@@ -1,5 +1,17 @@
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** Your machine now **tells the cloud which models it can actually serve** — every heartbeat and every live connection carries the local model list plus the exact engine tag (an Ollama tag, or a vLLM / llama.cpp model name). The cloud merges that into the node registry **by itself**, so a freshly connected node shows up as *model-serving* right away. Until now you had to ask the platform to bind the models by hand for every single machine; that chore is gone. A node that reports an **empty** list is treated as "confirmed: no engine here" and is skipped for inference work, while a node that reports nothing at all keeps working as before.
+
+**[CN]** 您的机器现在会**主动告诉云端自己到底能跑哪些模型**——每次心跳与每条长连接都会带上本地模型清单和引擎 tag（Ollama tag，或 vLLM / llama.cpp 的模型名）。云端据此**自动合并**进节点注册表，新接入的节点立刻就能被派发推理任务。此前每台新机器都要**手工**跑脚本绑模型，这件苦差事已经没有了。上报**空清单**的节点会被判定为「确认没有推理引擎」而不再参与派单；**完全不上报**的老节点行为不变，照常接单。
+
+**[EN]** The local panel (**http://127.0.0.1:52415/ui**) gained two new controls, both saved to `agent.config.json` and **effective immediately** — no restart, no editing `start.bat`: a **「强制待命模式」(Force Idle)** checkbox that pins the node to *always available* regardless of mouse and keyboard activity (perfect for a dedicated mining box), and a **「本地推理模型」(Local Inference Model)** input where you type the engine tag your machine should use. If you still prefer the environment variable `APIPAW_FORCE_IDLE=1`, it keeps working exactly as before — the checkbox just makes it a one-click operation instead of a file-editing ritual.
+
+**[CN]** 本地面板（**http://127.0.0.1:52415/ui**）新增两个开关，都写入 `agent.config.json` 且**立即生效**——不用重启、不用改 `start.bat`：**「强制待命模式」**勾选后无论键鼠是否有活动都把节点钉在「可接单」状态（适合专门挂机的机器）；**「本地推理模型」**输入框用来指定本机实际使用的引擎 tag。原先的环境变量 `APIPAW_FORCE_IDLE=1` 仍然完全可用——区别只是从「改脚本」变成「点一下」。
+
+**[EN]** Binding a node no longer needs a server terminal: the owner console can now issue a **Node ID + Node Secret** for you in one click, and you paste those two values straight into the panel's bind box. Each machine gets its own credential, so revoking one machine does not disturb the others.
+
+**[CN]** 绑定节点不必再开服务器终端：业主控制台现在可以**一键签发** `Node ID + Node Secret`，直接粘进面板的绑定框即可。每台机器一张独立凭证，吊销其中一台不会牵连其它机器。
+
 **[EN]** The node can now talk to **OpenAI-compatible** inference servers — **vLLM** and **llama.cpp** are both supported, next to the Ollama it already knew. Point the node at your engine in `agent.config.json` (`backend_vllm_base_url` / `backend_llamacpp_base_url`, plus `backend_api_key` if your engine requires one). The auto-probe **only** tries an OpenAI-compatible engine when you write its address down explicitly — it will never mistake some unrelated HTTP service (a web app, or the APIPaw gateway itself, which also lives on port 8000) for an inference engine. Token counts are taken from the engine's own `usage` report, so what the cloud bills you matches what the engine really produced.
 
 **[CN]** 节点现在支持对接 **OpenAI 兼容**推理服务——除原有的 Ollama 外，**vLLM** 与 **llama.cpp** 都能直接用。在 `agent.config.json` 里填好引擎地址（`backend_vllm_base_url` / `backend_llamacpp_base_url`，引擎要鉴权就再填 `backend_api_key`）即可。自动探测**只在您显式写了地址**时才会去试 OpenAI 兼容引擎——绝不会把某个不相干的 HTTP 服务（比如网页应用，或同样占用 8000 端口的 APIPaw 网关本身）误认成推理引擎。token 数取自引擎**自报**的 `usage`，云端计费与引擎真实产出对得上。

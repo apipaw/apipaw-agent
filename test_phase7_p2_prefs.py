@@ -117,7 +117,8 @@ def main() -> int:
     )
 
     # ── P2 / P5：HTTP 层 ──
-    from starlette.testclient import TestClient  # noqa: E402
+    # ⚠️ 阶段十六 P0：用**零依赖**的自研 ASGI 客户端，不再依赖 httpx
+    from asgi_test_client import TestClient  # noqa: E402
 
     app = agent_main.create_app()
     # ⚠️ **不进 lifespan**（不进 ``with``）：lifespan 会启动 WS 隧道 + 遥测

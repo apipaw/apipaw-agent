@@ -111,7 +111,8 @@ def _fake_urlopen(req, timeout=None):
 
 
 def main() -> int:
-    from starlette.testclient import TestClient  # noqa: E402
+    # ⚠️ 阶段十六 P0：用**零依赖**的自研 ASGI 客户端，不再依赖 httpx
+    from asgi_test_client import TestClient  # noqa: E402
 
     tmp_dir = tempfile.mkdtemp(prefix="apipaw_p15_p2_")
     path = Path(tmp_dir) / "agent.config.json"
@@ -154,6 +155,42 @@ def main() -> int:
             "http://127.0.0.1:11434", "x:latest", "SYSTEM \"\"\"hi\"\"\""
         ).get("ok") is False,
         "",
+    )
+
+    # ── P8（阶段十六 P1 修的真 bug 回归）：跨行块正文不许劫持指令 ──
+    # 生产云端真实下发的 Modelfile 里，MESSAGE assistant 正文**跨行**，
+    # 且正文里有一行以 "from " 开头（缩进的 Python import）⇒
+    # 老实现把它当成 FROM 指令 ⇒ 本机 Ollama 直接回 "invalid model name"
+    # ⇒ **进化模型永远合成不出来**。
+    multiline = (
+        "FROM qwen2.5:0.5b\n"
+        "PARAMETER temperature 0.7\n"
+        "SYSTEM \"\"\"第一行系统提示\n"
+        "第二行系统提示\"\"\"\n"
+        "MESSAGE user \"\"\"写一个函数\"\"\"\n"
+        "MESSAGE assistant \"\"\"def top_n(items, n):\n"
+        "    from collections import Counter\n"
+        "    return [x for x, _ in Counter(items).most_common(n)]\"\"\"\n"
+    )
+    ml = ollama_local.parse_modelfile(multiline)
+    msgs = ml.get("messages") or []
+    _record(
+        "P8 跨行 MESSAGE 正文里的 'from ...' 不再劫持 FROM 指令",
+        ml.get("from") == "qwen2.5:0.5b",
+        "from=%r" % (ml.get("from"),),
+    )
+    _record(
+        "P8 跨行 MESSAGE 正文被完整收走（缩进 import 仍在正文里）",
+        len(msgs) == 2
+        and "from collections import Counter" in (msgs[1].get("content") or "")
+        and msgs[1].get("role") == "assistant",
+        "messages=%r" % (msgs,),
+    )
+    _record(
+        "P8 跨行 SYSTEM 正文被完整收走（不再只剩第一行）",
+        "第一行系统提示" in (ml.get("system") or "")
+        and "第二行系统提示" in (ml.get("system") or ""),
+        "system=%r" % ((ml.get("system") or "")[:60],),
     )
 
     # ── P2：进化模型名推导 ──

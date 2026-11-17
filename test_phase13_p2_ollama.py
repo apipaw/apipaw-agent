@@ -124,7 +124,8 @@ def _make_config(tmp_dir: str):
 
 
 def main() -> int:
-    from starlette.testclient import TestClient  # noqa: E402
+    # ⚠️ 阶段十六 P0：用**零依赖**的自研 ASGI 客户端，不再依赖 httpx
+    from asgi_test_client import TestClient  # noqa: E402
 
     tmp_dir = tempfile.mkdtemp(prefix="apipaw_p13_p2_")
     cfg, cfg_path = _make_config(tmp_dir)

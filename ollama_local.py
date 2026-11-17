@@ -33,7 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 #: 本机 Ollama 默认地址（与 ``agent_config.backend_base_url`` 默认值一致）
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
@@ -335,6 +335,44 @@ def _coerce_param(value: str) -> Any:
     return text
 
 
+def _read_quoted_block(lines: List[str], idx: int, first: str) -> Tuple[str, int]:
+    """读取一个（可能跨行的）三引号块。
+
+    返回 ``(内容, 下一行下标)``。
+
+    ⚠️ **阶段十六 P1 修的真 bug**：Ollama Modelfile 的 ``SYSTEM`` / ``MESSAGE``
+    正文可以跨行（``MESSAGE assistant \"\"\"def top_n(items, n):`` 换行后再
+    ``from collections import Counter`` 收尾）。老实现按行平铺解析 ⇒
+
+    1. 正文里的 ``from collections import Counter`` 被当成 ``FROM`` 指令
+       ⇒ ``from`` 被改成 ``"collections import Counter"`` ⇒ 本机 Ollama 直接回
+       ``invalid model name``，**进化模型永远合成不出来**；
+    2. 跨行的 SYSTEM 正文被截断成第一行。
+
+    这里按"三引号开闭"把整块正文**一次性收走**，块内的行**不再参与指令解析**。
+    """
+    text = str(first or "")
+    if not (text.startswith('"""') or text.startswith("'''")):
+        return _strip_quotes(text), idx
+    quote = text[:3]
+    rest = text[3:]
+    end = rest.find(quote)
+    if end >= 0:
+        # 单行闭合
+        return rest[:end].strip(), idx
+    parts = [rest]
+    total = len(lines)
+    while idx < total:
+        line = lines[idx]
+        idx += 1
+        pos = line.find(quote)
+        if pos >= 0:
+            parts.append(line[:pos])
+            break
+        parts.append(line)
+    return "\n".join(parts).strip(), idx
+
+
 def parse_modelfile(text: str) -> Dict[str, Any]:
     """把标准 Ollama Modelfile 解析成 ``/api/create`` 要的结构。
 
@@ -346,11 +384,21 @@ def parse_modelfile(text: str) -> Dict[str, Any]:
     ⚠️ **只解析白名单指令**（``FROM`` / ``PARAMETER`` / ``SYSTEM`` / ``MESSAGE``）
     —— 云端 Modelfile 里若混进别的指令（比如 ``RUN``），一律忽略
     （本机 Agent 不应该被远端文本诱导去执行任何东西）。
+
+    ⚠️ 指令必须**顶格**（列 0）才生效 ⇒ 块正文里的缩进行永远不会被误认成指令。
     """
     out: Dict[str, Any] = {
         "from": "", "system": "", "messages": [], "parameters": {},
     }
-    for raw in str(text or "").splitlines():
+    lines = str(text or "").splitlines()
+    idx = 0
+    total = len(lines)
+    while idx < total:
+        raw = lines[idx]
+        idx += 1
+        # 指令必须顶格；缩进行只能是块正文
+        if not raw or not raw[:1].isalpha():
+            continue
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -365,14 +413,16 @@ def parse_modelfile(text: str) -> Dict[str, Any]:
             if len(parts) == 2:
                 out["parameters"][parts[0]] = _coerce_param(parts[1])
         elif upper.startswith("SYSTEM "):
-            out["system"] = _strip_quotes(line[len("SYSTEM "):])
+            value, idx = _read_quoted_block(lines, idx, line[len("SYSTEM "):])
+            out["system"] = value
         elif upper.startswith("MESSAGE "):
             body = line[len("MESSAGE "):].strip()
             role, _, content = body.partition(" ")
             role = role.strip().lower()
-            if role in ("user", "assistant", "system"):
-                out["messages"].append(
-                    {"role": role, "content": _strip_quotes(content)})
+            if role not in ("user", "assistant", "system"):
+                continue
+            value, idx = _read_quoted_block(lines, idx, content)
+            out["messages"].append({"role": role, "content": value})
     return out
 
 

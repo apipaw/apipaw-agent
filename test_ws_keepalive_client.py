@@ -79,21 +79,32 @@ class FakeCloud(object):
         self._server = None
         self._thread = None
         self._ready = threading.Event()
+        # ⚠️ 阶段十六 P0：停止信号**必须**是事件循环内的 ``asyncio.Event``。
+        #    早期版本用 ``await asyncio.Future()`` 硬挂 ⇒ 关闭时任务被强杀，
+        #    websockets 的 ``protocol_handler`` 在**事件循环已停**之后才去
+        #    ``asyncio.current_task()`` ⇒ Python 3.10+ 抛
+        #    ``RuntimeError: no running event loop``（测试输出被污染成假红）。
+        self._stop_event = None
 
     async def _handler(self, ws):
         self.connections += 1
         reader = asyncio.ensure_future(self._reader(ws))
         try:
             if self.ping_mode == "never":
-                await asyncio.Future()
+                await self._stop_event.wait()
             elif self.ping_mode == "once":
                 await asyncio.sleep(self.ping_interval)
                 await ws.send(json.dumps({"type": "PING", "ts": time.time()}))
                 self.pings_sent += 1
-                await asyncio.Future()
+                await self._stop_event.wait()
             else:
                 while True:
-                    await asyncio.sleep(self.ping_interval)
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(), timeout=self.ping_interval)
+                        return  # 收到停止信号 ⇒ 干净退出
+                    except asyncio.TimeoutError:
+                        pass
                     await ws.send(json.dumps({"type": "PING", "ts": time.time()}))
                     self.pings_sent += 1
         except Exception:  # noqa: BLE001 - 客户端断开是正常路径
@@ -122,9 +133,10 @@ class FakeCloud(object):
         ready = self._ready
 
         async def _run():
+            self._stop_event = asyncio.Event()
             self._server = await websockets.serve(self._handler, "127.0.0.1", port)
             ready.set()
-            await asyncio.Future()
+            await self._stop_event.wait()
 
         def _target():
             self._loop = asyncio.new_event_loop()
@@ -133,14 +145,38 @@ class FakeCloud(object):
                 self._loop.run_until_complete(_run())
             except Exception:  # noqa: BLE001
                 pass
+            finally:
+                try:
+                    self._loop.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         self._thread = threading.Thread(target=_target, name="FakeCloud", daemon=True)
         self._thread.start()
         ready.wait(timeout=10)
         return self
 
+    async def _shutdown(self):
+        """在**事件循环内**干净收尾：关服务器 + 唤醒所有等待者。"""
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._server is not None:
+            self._server.close()
+            try:
+                await self._server.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+
     def stop(self):
         if self._loop is not None:
+            try:
+                # ⚠️ 必须在事件循环**仍在运行**时完成收尾，
+                #    否则 websockets 的清理协程会在「无运行中事件循环」下执行 ⇒
+                #    ``RuntimeError: no running event loop``。
+                fut = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+                fut.result(timeout=5.0)
+            except Exception:  # noqa: BLE001 - 收尾失败不影响用例结论
+                pass
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:  # noqa: BLE001

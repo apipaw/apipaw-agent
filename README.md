@@ -19,6 +19,10 @@
 
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** **Bake a cloud-trained model on your own machine — with one click, no GPU, no training.** The new **「🧬 云端黄金记忆本地模型进化」(One-Click Model Evolution)** block in the local panel (**http://127.0.0.1:52415/ui**) pulls the platform's **curated golden memory** (the best buyer-approved answers, already desensitized) from the cloud, receives it as a standard Ollama `Modelfile`, and asks your **local** Ollama to synthesise a derived model from it (e.g. `qwen2.5-apipaw-golden:latest`). The result is a model that already carries the cloud's best answers as few-shot guidance — **zero training cost, zero GPU**. Tick **「合成后立即设为当前接单模型」** and the node starts serving it on the next dispatch. If your local Ollama is not running, the panel says so in plain words instead of failing.
+
+**[CN]** **在您自己的机器上，一键烘焙出带云端记忆的进化模型 —— 不用显卡、不用训练。** 本地面板（**http://127.0.0.1:52415/ui**）新增 **「🧬 云端黄金记忆本地模型进化」** 区块：从云端拉取**业主策展的黄金记忆**（已被买家采纳的优质问答，落库前已脱敏），以标准 Ollama `Modelfile` 的形式下发给本机，再让**本机** Ollama 合成一个派生模型（如 `qwen2.5-apipaw-golden:latest`）—— 相当于把云端最好的答案直接写进模型当成少样本范例，**零训练成本、零显卡**。勾上 **「合成后立即设为当前接单模型」**，下一次派单即用它接单。本机 Ollama 没启动时，面板会用人话如实告诉您，而不是直接报错。
+
 **[EN]** **No more command line for models.** The local panel (**http://127.0.0.1:52415/ui**) gained a **「本地 Ollama 模型管理」(Local Ollama Models)** block: it lists the models already installed on this machine (and tells you plainly when Ollama is not running), shows what the platform currently recommends — models that online nodes are actually serving, with their price and how much VRAM they need — and then does the rest for you. **「一键拉取并绑定」(Pull & Bind)** downloads the model in the background and automatically writes it into `agent.config.json` as your serving model; **「设为当前接单模型」(Set as serving model)** switches an already-installed model with one click. Model names are strictly validated, and the node only ever talks to `127.0.0.1` — no credential ever leaves your machine.
 
 **[CN]** **装模型不用再开命令行了。** 本地面板（**http://127.0.0.1:52415/ui**）新增 **「本地 Ollama 模型管理」** 区块：列出本机已装好的模型（Ollama 没启动也会如实告诉您），再把**云端当前推荐**的模型摆出来——也就是线上真有节点在跑的那些，带价格和显存门槛。剩下的动作面板替您做：**「一键拉取并绑定」** 会在后台把模型下载下来，并自动写进 `agent.config.json` 成为您的接单模型；**「设为当前接单模型」** 则让已装的模型一键切换。模型名经过严格校验，节点只跟 `127.0.0.1` 说话，任何凭证都不会离开您的机器。
@@ -64,7 +68,7 @@
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.13-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.14-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -72,7 +76,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.13-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.14-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -172,6 +176,36 @@ curl http://127.0.0.1:52415/health
 
 ---
 
+## 🧬 云端黄金记忆本地模型进化 | One-Click Model Evolution
+
+**[EN]** Open the **「🧬 云端黄金记忆本地模型进化」** block in the panel
+(**http://127.0.0.1:52415/ui**):
+
+| Action | What happens |
+|---|---|
+| **一键合成进化模型** | Fetches the cloud's curated golden memory as an Ollama `Modelfile`, then calls your local Ollama `POST /api/create` to synthesise a derived model (e.g. `qwen2.5-apipaw-golden:latest`) |
+| **合成后立即设为当前接单模型** | Also writes the new model into `agent.config.json` (`backend_model` + `model_name`) so the node serves it from the next dispatch on |
+
+The panel shows how many golden memories the cloud holds before you start. The
+base model defaults to your current `backend_model` (or `qwen2.5:0.5b`), and the
+new name is derived from it automatically — leave the field empty and it just
+works.
+
+**[CN]** 在面板（**http://127.0.0.1:52415/ui**）打开 **「🧬 云端黄金记忆本地模型进化」** 区块：
+
+| 操作 | 效果 |
+|---|---|
+| **一键合成进化模型** | 从云端拉取业主策展的黄金记忆（标准 Ollama `Modelfile`），交给本机 Ollama 的 `POST /api/create` 合成派生模型（如 `qwen2.5-apipaw-golden:latest`） |
+| **合成后立即设为当前接单模型** | 同时把新模型写进 `agent.config.json`（`backend_model` + `model_name`）—— 下一次派单即用它接单 |
+
+面板会先告诉您云端当前有多少条黄金记忆。基准模型默认取您当前的
+`backend_model`（没有就取 `qwen2.5:0.5b`），模型名留空会自动推导。
+
+> 云端下发的 Modelfile 里只有**已脱敏**的公开语料；节点只解析 `FROM` /
+> `PARAMETER` / `SYSTEM` / `MESSAGE` 四类指令，远端文本里的其它内容一律忽略。
+
+---
+
 ## 🆘 Troubleshooting | 常见问题
 
 **[EN]**
@@ -205,7 +239,7 @@ curl http://127.0.0.1:52415/health
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.13/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.14/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

@@ -268,10 +268,164 @@ class PullManager:
             self._state["finished_at"] = time.time()
 
 
+# ---------------------------------------------------------------------------
+# 阶段十五 P2 · 云端黄金记忆 ⇒ 本机 Ollama **合成进化模型**
+# ---------------------------------------------------------------------------
+#
+# 云端公开端点 ``/api/v1/network/golden-modelfile`` 会回一段**标准 Ollama
+# Modelfile**（``FROM`` / ``PARAMETER`` / ``SYSTEM`` / ``MESSAGE``）。
+# 本机只要把它交给 Ollama 的 ``POST /api/create``，就能在本地得到一个
+# "带着云端黄金 Few-Shot 的派生模型" —— **零训练成本、零显卡**。
+#
+# 为什么自己解析 Modelfile 而不是直接把文本丢给 Ollama：
+# - 老版本 Ollama 的 ``/api/create`` **不认** ``modelfile`` 字段（只认结构化的
+#   ``from`` / ``system`` / ``messages`` / ``parameters``）；
+# - 自己解析还能在**调用前**就知道云端到底给了多少范例（可回显给用户）。
+
+#: 合成模型是**本地**操作（复制 base 层 + 写入 system/messages），
+#: 但冷缓存 / 大 base 模型可能要几分钟 ⇒ 看门狗给足。
+CREATE_TIMEOUT_SEC = 900.0
+
+
+def derive_evolved_model_name(base_model: str) -> str:
+    """由基准模型推导**进化模型名**。
+
+    ``qwen2.5:0.5b`` → ``qwen2.5-apipaw-golden:latest``
+    ``library/llama3:8b`` → ``llama3-apipaw-golden:latest``
+
+    规则：取 ``:`` 前的**模型名**（去掉 ``library/`` 命名空间），拼上
+    ``-apipaw-golden:latest``。名字本身会被 :func:`validate_model_name` 复检。
+    """
+    text = str(base_model or "").strip()
+    if not text:
+        return "qwen2.5-apipaw-golden:latest"
+    base = text.split(":", 1)[0].strip()
+    if base.startswith("library/"):
+        base = base[len("library/"):]
+    base = base.strip() or "qwen2.5"
+    # 已经是个进化模型了 ⇒ **不要再叠一层**后缀
+    # （`qwen2.5-apipaw-golden:latest` 推一次不该变成 `…-apipaw-golden-apipaw-golden`）
+    if base.endswith("-apipaw-golden"):
+        return "%s:latest" % base
+    return "%s-apipaw-golden:latest" % base
+
+
+def _strip_quotes(value: str) -> str:
+    """去掉 Modelfile 里的引号包裹（``\"\"\"...\"\"\"`` / ``\"...\"`` / ``'...'``）。"""
+    text = str(value or "").strip()
+    if len(text) >= 6 and text.startswith('"""') and text.endswith('"""'):
+        return text[3:-3]
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        return text[1:-1]
+    if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
+        return text[1:-1]
+    return text
+
+
+def _coerce_param(value: str) -> Any:
+    """PARAMETER 的值：能转成数字就转（Ollama 的 parameters 是结构化字段）。"""
+    text = str(value or "").strip()
+    try:
+        if re.fullmatch(r"-?\d+", text):
+            return int(text)
+        if re.fullmatch(r"-?\d*\.\d+", text):
+            return float(text)
+    except Exception:  # noqa: BLE001 - 正则异常不该影响合成
+        pass
+    return text
+
+
+def parse_modelfile(text: str) -> Dict[str, Any]:
+    """把标准 Ollama Modelfile 解析成 ``/api/create`` 要的结构。
+
+    返回::
+
+        {"from": str, "system": str, "messages": [{"role","content"}],
+         "parameters": {...}}
+
+    ⚠️ **只解析白名单指令**（``FROM`` / ``PARAMETER`` / ``SYSTEM`` / ``MESSAGE``）
+    —— 云端 Modelfile 里若混进别的指令（比如 ``RUN``），一律忽略
+    （本机 Agent 不应该被远端文本诱导去执行任何东西）。
+    """
+    out: Dict[str, Any] = {
+        "from": "", "system": "", "messages": [], "parameters": {},
+    }
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        upper = line.upper()
+        if upper.startswith("FROM "):
+            out["from"] = line[len("FROM "):].strip()
+        elif upper.startswith("PARAMETER "):
+            body = line[len("PARAMETER "):].strip()
+            if not body:
+                continue
+            parts = body.split(None, 1)
+            if len(parts) == 2:
+                out["parameters"][parts[0]] = _coerce_param(parts[1])
+        elif upper.startswith("SYSTEM "):
+            out["system"] = _strip_quotes(line[len("SYSTEM "):])
+        elif upper.startswith("MESSAGE "):
+            body = line[len("MESSAGE "):].strip()
+            role, _, content = body.partition(" ")
+            role = role.strip().lower()
+            if role in ("user", "assistant", "system"):
+                out["messages"].append(
+                    {"role": role, "content": _strip_quotes(content)})
+    return out
+
+
+def create_model_from_modelfile(base_url: str, name: str,
+                                 modelfile_text: str,
+                                 timeout: float = CREATE_TIMEOUT_SEC
+                                 ) -> Dict[str, Any]:
+    """用云端 Modelfile 在**本机** Ollama 上合成一个派生模型。
+
+    返回 ``{"ok", "error", "name", "from", "messages", "system"}``。
+
+    - 本机 Ollama **没起来** ⇒ ``{"ok": False, "error": "本机 Ollama 未运行…"}``
+      （调用方据此给用户一句人话，而不是 500）；
+    - Modelfile 解析不出 ``FROM`` ⇒ 拒绝合成（不能凭空造一个模型）。
+    """
+    parsed = parse_modelfile(modelfile_text)
+    if not parsed.get("from"):
+        return {"ok": False, "error": "云端 Modelfile 缺少 FROM 行，无法合成",
+                "name": name, "from": "", "messages": 0, "system": ""}
+    payload: Dict[str, Any] = {"model": name, "stream": False}
+    payload["from"] = parsed["from"]
+    if parsed.get("system"):
+        payload["system"] = parsed["system"]
+    if parsed.get("messages"):
+        payload["messages"] = parsed["messages"]
+    if parsed.get("parameters"):
+        payload["parameters"] = parsed["parameters"]
+    url = (base_url or DEFAULT_OLLAMA_BASE_URL).rstrip("/") + "/api/create"
+    try:
+        obj = _http_json(url, payload, timeout, method="POST")
+    except OllamaError as exc:
+        return {"ok": False, "error": str(exc), "name": name,
+                "from": parsed["from"], "messages": len(parsed["messages"]),
+                "system": len(parsed["system"] or "")}
+    status = ""
+    if isinstance(obj, dict):
+        status = str(obj.get("status") or obj.get("error") or "")
+    if status and status.lower() not in ("success", "ok", ""):
+        return {"ok": False, "error": "Ollama 返回：%s" % status, "name": name,
+                "from": parsed["from"], "messages": len(parsed["messages"]),
+                "system": len(parsed["system"] or "")}
+    return {"ok": True, "error": "", "name": name, "from": parsed["from"],
+            "messages": len(parsed["messages"]),
+            "system": len(parsed["system"] or "")}
+
+
 __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
     "OllamaError",
     "PullManager",
+    "create_model_from_modelfile",
+    "derive_evolved_model_name",
     "list_local_models",
+    "parse_modelfile",
     "validate_model_name",
 ]

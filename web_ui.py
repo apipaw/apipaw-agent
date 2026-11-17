@@ -431,6 +431,37 @@ UI_HTML = r"""<!DOCTYPE html>
         <div class="ollama-list" id="recModels"></div>
       </div>
 
+      <!-- 阶段十五 P2：云端黄金记忆 ⇒ 本机一键合成进化模型 -->
+      <div class="section">
+        <div class="section-title">🧬 云端黄金记忆本地模型进化（One-Click Model Evolution）</div>
+        <div class="status" id="evolveStatus">读取云端黄金记忆…</div>
+
+        <div class="field">
+          <label for="evolveBase">基准模型（Modelfile 的 FROM 行）</label>
+          <input id="evolveBase" type="text" placeholder="qwen2.5:0.5b" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label for="evolveName">进化模型名（留空 = 自动推导）</label>
+          <input id="evolveName" type="text" placeholder="qwen2.5-apipaw-golden:latest" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label class="check" for="evolveBind">
+            <input id="evolveBind" type="checkbox" />
+            <span>
+              合成后立即设为当前接单模型
+              <span class="check-desc">
+                云端把黄金 Few-Shot 写进本机模型的 system / messages —— 零训练、零显卡，
+                本机 Ollama 起来就能用。
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <button class="primary" id="evolveBtn">🧬 一键合成进化模型</button>
+      </div>
+
       <div class="status" id="status">等待绑定…</div>
 
       <div class="meta">
@@ -794,11 +825,66 @@ UI_HTML = r"""<!DOCTYPE html>
       .catch(function (e) { sayRec("读取云端推荐列表失败：" + e.message, "err"); });
   }
 
+  // ── 阶段十五 P2：云端黄金记忆 ⇒ 本机一键合成进化模型 ──
+  var evolveStatusEl = $("evolveStatus"), evolveBtnEl = $("evolveBtn");
+  var evolveBaseEl = $("evolveBase"), evolveNameEl = $("evolveName");
+  var evolveBindEl = $("evolveBind");
+
+  function sayEvolve(text, kind) {
+    evolveStatusEl.textContent = text;
+    evolveStatusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function loadGoldenSummary() {
+    return fetch("/api/ollama/golden-summary", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { sayEvolve("读取云端黄金记忆失败：" + (d.error || "未知错误"), "err"); return; }
+        sayEvolve("云端黄金记忆 " + (d.golden_count || 0) + " 条 · 语料池 " + (d.pool_total || 0) + " 条", "ok");
+      })
+      .catch(function (e) { sayEvolve("读取云端黄金记忆失败：" + e.message, "err"); });
+  }
+
+  function evolveModel() {
+    evolveBtnEl.disabled = true;
+    sayEvolve("正在拉取云端黄金记忆并在本机合成…", "wait");
+    fetch("/api/ollama/evolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base_model: evolveBaseEl.value.trim(),
+        name: evolveNameEl.value.trim(),
+        bind: !!evolveBindEl.checked
+      })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        var b = res.body || {};
+        if (!b.ok) {
+          sayEvolve(b.message || "合成失败", "err");
+          evolveBtnEl.disabled = false;
+          return;
+        }
+        sayEvolve("✓ " + (b.message || "合成完成") + "（黄金范例 " +
+                  (b.few_shot_messages || 0) + " 条 · 云端黄金 " +
+                  (b.golden_count || 0) + " 条）", "ok");
+        evolveBtnEl.disabled = false;
+        loadOllama();
+      })
+      .catch(function (e) {
+        sayEvolve("合成请求失败：" + e.message, "err");
+        evolveBtnEl.disabled = false;
+      });
+  }
+
+  evolveBtnEl.addEventListener("click", evolveModel);
+
   refresh();
   setInterval(refresh, 5000);
   loadOllama();
   loadRecommended();
-  setInterval(function () { loadOllama(); loadRecommended(); }, 15000);
+  loadGoldenSummary();
+  setInterval(function () { loadOllama(); loadRecommended(); loadGoldenSummary(); }, 15000);
 })();
 </script>
 </body>

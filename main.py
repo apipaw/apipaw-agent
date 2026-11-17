@@ -48,6 +48,8 @@ import platform
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 import webbrowser
 from contextlib import asynccontextmanager
@@ -64,6 +66,8 @@ from ollama_local import (
     DEFAULT_OLLAMA_BASE_URL,
     OllamaError,
     PullManager,
+    create_model_from_modelfile,
+    derive_evolved_model_name,
     list_local_models,
     validate_model_name,
 )
@@ -145,6 +149,21 @@ class OllamaBindRequest(BaseModel):
     """把本机某个模型设为当前接单模型（阶段十三 P2）。"""
 
     model: str = Field(default="", max_length=256)
+
+
+class OllamaEvolveRequest(BaseModel):
+    """云端黄金记忆 ⇒ 本机合成进化模型（阶段十五 P2）。
+
+    - ``base_model``：基准模型（留空 = 跟随 ``backend_model``，再兜底
+      ``qwen2.5:0.5b``）；
+    - ``name``：合成后的模型名（留空 = 由基准模型推导，如
+      ``qwen2.5-apipaw-golden:latest``）；
+    - ``bind``：合成成功后是否**立刻**设为当前接单模型。
+    """
+
+    base_model: str = Field(default="", max_length=256)
+    name: str = Field(default="", max_length=256)
+    bind: bool = False
 
 
 # ──────────────────────────────────────────────────────────────
@@ -664,6 +683,143 @@ def create_app() -> FastAPI:
             "backend_model": saved.get("backend_model"),
             "model_name": saved.get("model_name"),
             "message": "已设为当前接单模型，下一次派单立即生效"})
+
+    # ── 阶段十五 P2：云端黄金记忆 ⇒ 本机一键合成进化模型 ──────────────
+    @app.post("/api/ollama/evolve")
+    async def api_ollama_evolve(req: OllamaEvolveRequest) -> JSONResponse:
+        """**一键合成进化模型**（阶段十五 P2 · 终极闭环的本地半边）。
+
+        流程：
+
+        1. 从云端公开端点拉 **标准 Ollama Modelfile**
+           （``/api/v1/network/golden-modelfile``，只含脱敏后的公开黄金语料）；
+        2. 在**本机** Ollama 上 ``POST /api/create`` 合成派生模型
+           （零训练成本：把黄金 Few-Shot 直接写进 system / messages）；
+        3. 可选：把新模型写成当前接单模型（``backend_model`` + ``model_name``）。
+
+        ⚠️ 本机 Ollama 没起来 ⇒ 回 **200 + ``ok:false`` + 人话提示**
+        （不是 500）—— 面板要能直接把这句话显示给用户。
+        """
+        base = str(cfg.cloud_api_base or "").rstrip("/")
+        if not base:
+            return JSONResponse(status_code=200, content={
+                "ok": False, "evolved": False,
+                "message": "未配置云端地址（cloud_api_base），无法拉取云端黄金记忆"})
+        base_model = str(req.base_model or "").strip() \
+            or str(cfg.backend_model or "").strip() \
+            or "qwen2.5:0.5b"
+        try:
+            validate_model_name(base_model)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={
+                "ok": False, "evolved": False, "message": str(exc)})
+        name = str(req.name or "").strip() or derive_evolved_model_name(base_model)
+        try:
+            validate_model_name(name)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={
+                "ok": False, "evolved": False, "message": str(exc)})
+
+        url = "%s/api/v1/network/golden-modelfile?base_model=%s" % (
+            base, urllib.parse.quote(base_model, safe=""))
+
+        def _fetch() -> str:
+            request = urllib.request.Request(
+                url, headers={"Accept": "text/plain"})
+            with urllib.request.urlopen(request, timeout=20) as resp:
+                return resp.read().decode("utf-8", "replace")
+
+        def _fetch_summary() -> Dict[str, Any]:
+            request = urllib.request.Request(
+                base + "/api/v1/network/golden-summary",
+                headers={"Accept": "application/json"})
+            with urllib.request.urlopen(request, timeout=10) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                return {}
+            return obj if isinstance(obj, dict) else {}
+
+        try:
+            modelfile_text = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+        except Exception as exc:  # noqa: BLE001 - 云端不可达要给用户一句人话
+            return JSONResponse(status_code=200, content={
+                "ok": False, "evolved": False,
+                "message": "读取云端黄金记忆失败：%s" % exc})
+        try:
+            summary = await asyncio.get_running_loop().run_in_executor(
+                None, _fetch_summary)
+        except Exception:  # noqa: BLE001 - 摘要只是锦上添花
+            summary = {}
+
+        ollama_base = str(cfg.backend_base_url or DEFAULT_OLLAMA_BASE_URL)
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, create_model_from_modelfile,
+            ollama_base, name, modelfile_text)
+        if not result.get("ok"):
+            message = str(result.get("error") or "合成失败")
+            if "无法连接本机 Ollama" in message:
+                message = ("本机 Ollama 未运行（%s），请先启动 Ollama 再试"
+                           % ollama_base)
+            return JSONResponse(status_code=200, content={
+                "ok": False, "evolved": False, "name": name,
+                "base_model": base_model, "message": message,
+                "golden_count": int(summary.get("golden_count") or 0)})
+
+        bound = False
+        saved: Dict[str, Any] = {}
+        if req.bind:
+            try:
+                saved = _persist_serving_model(name)
+                bound = True
+            except Exception as exc:  # noqa: BLE001 - 写盘失败必须回显
+                return JSONResponse(status_code=500, content={
+                    "ok": False, "evolved": True, "name": name,
+                    "message": "模型已合成，但写入配置失败：%s" % exc})
+        print("[ollama] 已合成进化模型 %s（黄金范例 %s 条）"
+              % (name, result.get("messages")))
+        return JSONResponse(status_code=200, content={
+            "ok": True, "evolved": True, "name": name,
+            "base_model": base_model, "from": result.get("from"),
+            "few_shot_messages": int(result.get("messages") or 0),
+            "system_chars": int(result.get("system") or 0),
+            "golden_count": int(summary.get("golden_count") or 0),
+            "bound": bound,
+            "backend_model": saved.get("backend_model", ""),
+            "model_name": saved.get("model_name", ""),
+            "message": ("已合成 %s%s" % (
+                name, "，并设为当前接单模型" if bound else "")),
+        })
+
+    @app.get("/api/ollama/golden-summary")
+    async def api_ollama_golden_summary() -> JSONResponse:
+        """云端黄金记忆摘要（公开端点代理）—— 面板在合成前先给用户看一眼。"""
+        base = str(cfg.cloud_api_base or "").rstrip("/")
+        if not base:
+            return JSONResponse(status_code=200, content={
+                "ok": False, "golden_count": 0, "error": "未配置云端地址"})
+
+        def _fetch() -> Dict[str, Any]:
+            request = urllib.request.Request(
+                base + "/api/v1/network/golden-summary",
+                headers={"Accept": "application/json"})
+            with urllib.request.urlopen(request, timeout=10) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(status_code=200, content={
+                "ok": False, "golden_count": 0, "error": str(exc)})
+        return JSONResponse(status_code=200, content={
+            "ok": True,
+            "golden_count": int(data.get("golden_count") or 0),
+            "pool_total": int(data.get("pool_total") or 0),
+            "latest": data.get("latest") or [],
+            "error": ""})
 
     return app
 

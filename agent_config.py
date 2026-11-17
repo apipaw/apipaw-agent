@@ -89,7 +89,11 @@ CONFIG_FILE_NAME = "agent.config.json"
 #   ``auto`` 探测支持多引擎（Ollama 优先，OpenAI 兼容引擎需**显式配置地址**
 #   才进候选，避免误认本机其它 HTTP 服务）；DONE 帧新增 ``perf``
 #   （节点自测的 TTFT / 吐字速度），云端据此用**真实**性能口径。
-AGENT_VERSION = "1.0.13"
+#   （阶段十五 P2）：新增**云端黄金记忆 ⇒ 本机一键合成进化模型**闭环 ——
+#   云端公开端点下发标准 Ollama Modelfile（脱敏后的黄金 Few-Shot），
+#   本机 ``POST /api/create`` 合成派生模型（零训练、零显卡），
+#   可一键设为当前接单模型；面板新增「🧬 云端黄金记忆本地模型进化」卡片。
+AGENT_VERSION = "1.0.14"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

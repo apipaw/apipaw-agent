@@ -37,8 +37,12 @@ from yield_monitor import NodeState, get_yield_monitor
 
 enable_utf8_output()
 
-# nvidia-smi 查询字段：温度 / 显存已用 / 显存总量（MiB）
-_NVIDIA_SMI_FIELDS = "temperature.gpu,memory.used,memory.total"
+# nvidia-smi 查询字段：温度 / 风扇转速 / 显存已用 / 显存总量（MiB）
+#
+# ⚠️ 阶段十七 P2：风扇转速（fan.speed）并入**同一次**子进程调用 ——
+# 分两次查会让每个心跳周期多跑一次 nvidia-smi（Windows 上单次 100~300ms，
+# 且会短暂占用 GPU 查询通道）。
+_NVIDIA_SMI_FIELDS = "temperature.gpu,fan.speed,memory.used,memory.total"
 _NVIDIA_SMI_TIMEOUT_SEC = 3.0
 # 云端在 Cloudflare 之后，本地到 CF 链路抖动大（实测单次 GET 成功耗时 2~16s，
 # 偶发 TLS 握手超时）。心跳超时给足余量，避免"链路其实通、但被 5s 超时掐断"。
@@ -90,6 +94,116 @@ def _nvidia_smi_path() -> Optional[str]:
     return None
 
 
+def _env_float(name: str) -> Optional[float]:
+    """读取环境变量并转成 float；无效或未设置 ⇒ ``None``（绝不抛异常）。"""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mock_thermals_enabled() -> bool:
+    """是否处于「模拟温控注入」模式。
+
+    注入模式下**完全跳过** nvidia-smi 子进程 —— 验收环境（无独显 / CI）
+    因此能稳定复现高温告警，且不会因为本机真值而漂移。
+    """
+    return (
+        os.getenv("APIPAW_MOCK_GPU_TEMP_C", "").strip() != ""
+        or os.getenv("APIPAW_MOCK_GPU_FAN_PCT", "").strip() != ""
+    )
+
+
+def _sample_nvidia_smi() -> Optional[Dict[str, Optional[float]]]:
+    """一次 ``nvidia-smi`` 调用取回温度 / 风扇 / 显存。
+
+    返回 ``None`` 表示命令不可用或输出无法解析（调用方据此降级）。
+    **绝不抛异常** —— 采集失败绝不能打断心跳。
+    """
+    smi = _nvidia_smi_path()
+    if not smi:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                smi,
+                f"--query-gpu={_NVIDIA_SMI_FIELDS}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_NVIDIA_SMI_TIMEOUT_SEC,
+        )
+    except Exception:  # noqa: BLE001 - 采集失败降级
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    line = proc.stdout.strip().splitlines()[0]
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) < 4:
+        return None
+    sample: Dict[str, Optional[float]] = {
+        "gpu_temp_c": None,
+        "gpu_fan_pct": None,
+        "vram_used_gb": None,
+        "vram_total_gb": None,
+        "vram_free_gb": None,
+    }
+    # 温度：数值或 "[N/A]"
+    try:
+        sample["gpu_temp_c"] = float(parts[0])
+    except (TypeError, ValueError):
+        pass
+    # 风扇转速：部分型号（多卡/被动散热）回报 "[N/A]" ⇒ 保留 None
+    try:
+        sample["gpu_fan_pct"] = float(parts[1])
+    except (TypeError, ValueError):
+        pass
+    try:
+        used_mib = float(parts[2])
+        total_mib = float(parts[3])
+        sample["vram_used_gb"] = round(used_mib / 1024.0, 3)
+        sample["vram_total_gb"] = round(total_mib / 1024.0, 3)
+        sample["vram_free_gb"] = round(max(0.0, total_mib - used_mib) / 1024.0, 3)
+    except (TypeError, ValueError):
+        pass
+    return sample
+
+
+def probe_gpu_thermals() -> Dict[str, Optional[float]]:
+    """采集 GPU **温度与风扇转速**（阶段十七 P2）。
+
+    返回::
+
+        {
+            "gpu_temp_c": 52.0,     # 摄氏度，None 表示不可用
+            "gpu_fan_pct": 61.0,    # 风扇转速百分比，None 表示不可用
+        }
+
+    规则：
+      1. **绝不抛异常** —— 无 NVIDIA 独显 / 命令不可用 / 输出异常一律回退 ``None``；
+      2. ``APIPAW_MOCK_GPU_TEMP_C`` / ``APIPAW_MOCK_GPU_FAN_PCT`` 可注入模拟值
+         （注入模式**完全跳过** nvidia-smi，保证验收可复现）；
+      3. 温度 ≥ 75°C 由**云端**判定为 ``overheat_warning``（口径两边一致）。
+    """
+    result: Dict[str, Optional[float]] = {
+        "gpu_temp_c": None,
+        "gpu_fan_pct": None,
+    }
+    if _mock_thermals_enabled():
+        result["gpu_temp_c"] = _env_float("APIPAW_MOCK_GPU_TEMP_C")
+        result["gpu_fan_pct"] = _env_float("APIPAW_MOCK_GPU_FAN_PCT")
+        return result
+    sample = _sample_nvidia_smi()
+    if sample:
+        result["gpu_temp_c"] = sample.get("gpu_temp_c")
+        result["gpu_fan_pct"] = sample.get("gpu_fan_pct")
+    return result
+
+
 def collect_gpu_metrics() -> Dict[str, Optional[float]]:
     """
     采集 GPU 指标。
@@ -98,6 +212,7 @@ def collect_gpu_metrics() -> Dict[str, Optional[float]]:
 
         {
             "gpu_temp_c": 52.0,        # 摄氏度，None 表示不可用
+            "gpu_fan_pct": 61.0,       # 风扇转速百分比（阶段十七 P2）
             "vram_used_gb": 3.2,       # 已用显存（GB）
             "vram_total_gb": 6.0,      # 显存总量（GB）
             "vram_free_gb": 2.8,       # 剩余显存（GB）
@@ -105,43 +220,24 @@ def collect_gpu_metrics() -> Dict[str, Optional[float]]:
     """
     metrics: Dict[str, Optional[float]] = {
         "gpu_temp_c": None,
+        "gpu_fan_pct": None,
         "vram_used_gb": None,
         "vram_total_gb": None,
         "vram_free_gb": None,
     }
 
-    # ── 1. nvidia-smi ──
-    smi = _nvidia_smi_path()
-    if smi:
-        try:
-            proc = subprocess.run(
-                [
-                    smi,
-                    f"--query-gpu={_NVIDIA_SMI_FIELDS}",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=_NVIDIA_SMI_TIMEOUT_SEC,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                line = proc.stdout.strip().splitlines()[0]
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
-                    temp = float(parts[0])
-                    used_mib = float(parts[1])
-                    total_mib = float(parts[2])
-                    metrics["gpu_temp_c"] = temp
-                    metrics["vram_used_gb"] = round(used_mib / 1024.0, 3)
-                    metrics["vram_total_gb"] = round(total_mib / 1024.0, 3)
-                    metrics["vram_free_gb"] = round(
-                        max(0.0, total_mib - used_mib) / 1024.0, 3
-                    )
-                    return metrics
-        except Exception:  # noqa: BLE001 - 采集失败降级到 torch
-            pass
+    # ── 1. nvidia-smi（温度 / 风扇 / 显存，一次调用取全）──
+    if _mock_thermals_enabled():
+        # 注入模式：跳过子进程（验收环境可复现，且不会因本机真值漂移）
+        metrics.update(probe_gpu_thermals())
+    else:
+        sample = _sample_nvidia_smi()
+        if sample:
+            metrics.update(sample)
+            if sample.get("vram_total_gb") is not None:
+                return metrics
 
-    # ── 2. torch ──
+    # ── 2. torch（显存兜底；温度 torch 拿不到，保持 None）──
     try:
         import torch  # type: ignore
 
@@ -234,6 +330,8 @@ class TelemetryReporter:
             "model_name": cfg.model_name,
             "max_vram_gb": cfg.max_vram_gb,
             "gpu_temp_c": gpu["gpu_temp_c"],
+            # 阶段十七 P2：风扇转速（云端据此派生高温告警，阈值 75°C）
+            "gpu_fan_pct": gpu.get("gpu_fan_pct"),
             "vram_used_gb": gpu["vram_used_gb"],
             "vram_total_gb": gpu["vram_total_gb"],
             "vram_free_gb": gpu["vram_free_gb"],
@@ -456,5 +554,7 @@ __all__ = [
     "AGENT_VERSION",
     "TelemetryReporter",
     "collect_gpu_metrics",
+    "collect_gpu_metrics_cached",
+    "probe_gpu_thermals",
     "get_reporter",
 ]

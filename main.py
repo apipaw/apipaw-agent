@@ -400,6 +400,16 @@ def create_app() -> FastAPI:
     async def api_status() -> Dict[str, Any]:
         """当前绑定状态与云端连接情况，供面板预填与状态灯使用。"""
         monitor = get_yield_monitor()
+        # 阶段十七 P2：GPU 温控读数（走 TTL 缓存，绝不为面板多跑 nvidia-smi）
+        thermals: Dict[str, Any] = {"gpu_temp_c": None, "gpu_fan_pct": None}
+        try:
+            from telemetry import collect_gpu_metrics_cached
+
+            cached_gpu = collect_gpu_metrics_cached()
+            thermals["gpu_temp_c"] = cached_gpu.get("gpu_temp_c")
+            thermals["gpu_fan_pct"] = cached_gpu.get("gpu_fan_pct")
+        except Exception:  # noqa: BLE001 - 采集失败不影响面板
+            pass
         return {
             "ok": True,
             "node_id": cfg.node_id,
@@ -412,6 +422,9 @@ def create_app() -> FastAPI:
             "force_idle": bool(cfg.force_idle),
             "backend_model": str(cfg.backend_model or ""),
             "inference_backend": str(cfg.inference_backend or ""),
+            # 阶段十七 P2：GPU 温度 / 风扇转速（None = 本机无独显或不可读）
+            "gpu_temp_c": thermals["gpu_temp_c"],
+            "gpu_fan_pct": thermals["gpu_fan_pct"],
             "timestamp": int(time.time()),
         }
 

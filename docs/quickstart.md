@@ -1,5 +1,9 @@
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** **Your GPU now reports its own temperature and fan speed.** The node reads `nvidia-smi` non-blockingly on every heartbeat and over the live WebSocket channel, so the cloud knows exactly how hot your card is running — the local panel (**http://127.0.0.1:52415/ui**) shows **「GPU 温度」** next to the node's other vitals, turning amber when it climbs and red when it crosses the 75 °C overheat line. Machines **without** an NVIDIA card are perfectly fine: the reading simply shows as unavailable instead of guessing, and nothing ever blocks or breaks the heartbeat. For demos you can force a value with `APIPAW_MOCK_GPU_TEMP_C` / `APIPAW_MOCK_GPU_FAN_PCT`.
+
+**[CN]** **显卡自己会报温度和风扇转速了。** 节点在每次心跳与每条长连接上**非阻塞**读取 `nvidia-smi`，云端因此确切知道您的显卡跑到了多热 —— 本地面板（**http://127.0.0.1:52415/ui**）在节点状态一栏显示**「GPU 温度」**，温度升高时变琥珀色、越过 75 °C 过热线时变红。**没有 NVIDIA 独显**的机器完全不受影响：读数只会显示为「不可用」而不是瞎猜，心跳绝不会因此被阻塞或出错。做演示时可用 `APIPAW_MOCK_GPU_TEMP_C` / `APIPAW_MOCK_GPU_FAN_PCT` 强制注入数值。
+
 **[EN]** **One-click model evolution now actually works end to end.** The `Modelfile` parser used to mistake ordinary Python-looking lines *inside* a multi-line `SYSTEM` / `MESSAGE` block for top-level directives — which silently truncated the golden memory and made Ollama reject the recipe with an "invalid model name" error. The parser now treats **only column-0 lines** as directives and reads multi-line blocks whole, so the cloud's curated memory arrives at your local engine intact. Two historical test warnings were also cleaned up (the usage-report and WebSocket keep-alive suites), and the whole agent test suite now runs green.
 
 **[CN]** **「一键模型进化」现在真的跑得通了。** 以前解析 `Modelfile` 时，`SYSTEM` / `MESSAGE` **多行**正文里那些看起来像 Python 代码的行会被误当成顶层指令，导致黄金记忆被截断，Ollama 还会报 "invalid model name"。现在解析器只把**行首（第 0 列）**的行当指令，多行正文整段读取 ⇒ 云端策展的记忆完整无损地送进本机引擎。同时修好了两个历史遗留的测试告警（用量上报与 WebSocket 保活两套用例），Agent 全量单测现已全绿。

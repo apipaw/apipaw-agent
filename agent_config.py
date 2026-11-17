@@ -93,7 +93,11 @@ CONFIG_FILE_NAME = "agent.config.json"
 #   云端公开端点下发标准 Ollama Modelfile（脱敏后的黄金 Few-Shot），
 #   本机 ``POST /api/create`` 合成派生模型（零训练、零显卡），
 #   可一键设为当前接单模型；面板新增「🧬 云端黄金记忆本地模型进化」卡片。
-AGENT_VERSION = "1.0.15"
+#   （阶段十七 P2）：新增 **GPU 温控遥测** —— 心跳与 WS 帧携带
+#   ``gpu_temp_c`` / ``gpu_fan_pct``（nvidia-smi **一次调用**取全温度/风扇/显存），
+#   云端据此派生 ``overheat_warning``（阈值 75°C）并在业主节点卡片与智能告警中心
+#   展示；本机面板新增 GPU 温度 / 风扇徽标（高温高亮）。
+AGENT_VERSION = "1.0.16"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

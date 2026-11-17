@@ -571,6 +571,8 @@ class WebSocketTunnel:
             "vram_used_gb": gpu.get("vram_used_gb"),
             "vram_free_gb": gpu.get("vram_free_gb"),
             "gpu_temp_c": gpu.get("gpu_temp_c"),
+            # 阶段十七 P2：风扇转速（与温度同源；云端据此派生 overheat_warning）
+            "gpu_fan_pct": gpu.get("gpu_fan_pct"),
             "completed_tokens": self._total_completed_tokens,
             "agent_version": AGENT_VERSION,
             "timestamp": time.time(),

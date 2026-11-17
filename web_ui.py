@@ -240,6 +240,16 @@ UI_HTML = r"""<!DOCTYPE html>
     color: var(--muted);
   }
 
+  /* 阶段十七 P2：GPU 温控徽标（≥75°C 高亮告警） */
+  .gpu-thermal {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+  .gpu-thermal.hot { color: var(--err); font-weight: 700; }
+  .gpu-thermal.warm { color: var(--cyan); }
+
   .dot {
     display: inline-block;
     width: 8px; height: 8px;
@@ -466,6 +476,7 @@ UI_HTML = r"""<!DOCTYPE html>
 
       <div class="meta">
         <span><span class="dot" id="dot"></span><span id="connText">云端连接：检测中</span></span>
+        <span class="gpu-thermal" id="gpuThermal">GPU 温度：—</span>
         <span id="ver">Agent v__AGENT_VERSION__</span>
       </div>
 
@@ -531,6 +542,20 @@ UI_HTML = r"""<!DOCTYPE html>
         setConn(!!s.ws_connected);
         if (!nodeIdEl.value && s.node_id) { nodeIdEl.value = s.node_id; }
         if (s.agent_version) { $("ver").textContent = "Agent v" + s.agent_version; }
+        // 阶段十七 P2：GPU 温度 / 风扇转速（≥75°C 高亮告警，与云端口径一致）
+        (function () {
+          var el = $("gpuThermal");
+          if (!el) return;
+          var temp = s.gpu_temp_c, fan = s.gpu_fan_pct;
+          if (temp === null || temp === undefined) {
+            el.className = "gpu-thermal";
+            el.textContent = "GPU 温度：不可读";
+            return;
+          }
+          el.className = "gpu-thermal" + (temp >= 75 ? " hot" : (temp >= 65 ? " warm" : ""));
+          el.textContent = "GPU 温度：" + Number(temp).toFixed(0) + "°C"
+            + (fan === null || fan === undefined ? "" : " · 风扇 " + Number(fan).toFixed(0) + "%");
+        })();
         // 阶段七 P2：预填运行偏好（只在用户没改过的时候覆盖，避免轮询打断输入）
         if (typeof s.backend_model === "string" && !backendModelEl.dataset.touched) {
           backendModelEl.value = s.backend_model;

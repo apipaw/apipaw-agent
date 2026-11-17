@@ -19,6 +19,10 @@
 
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** **Your node now signs its own answers — the cloud can finally tell real work from fakes.** Every finished inference is stamped with a **Proof-of-Inference receipt**: the node hashes the exact text it produced (`SHA-256`) and signs `request_id : model_id : prompt_tokens : completion_tokens : sha256(output)` with **HMAC-SHA256** using your node's own secret. The receipt travels with the answer frame and with the heartbeat, and the cloud re-computes the same signature with the same key — so **forged receipts**, **inflated token counts** (claiming 5 000 tokens for a 12-character answer) and **low-entropy garbage** can all be spotted and the offender's credit score can be docked. Nothing changes for you: the panel (**http://127.0.0.1:52415/ui**) works exactly as before, the secret never leaves your machine, and a node without a secret simply sends no receipt (treated as "no proof", never as fraud).
+
+**[CN]** **节点现在会给自己的答案签名 —— 云端终于能分辨真干活与造假。** 每次推理结束都会打上一枚 **PoI（Proof-of-Inference）签名收据**：节点先对**自己产出的原文**做 `SHA-256`，再用**节点密钥**对 `request_id : model_id : prompt_tokens : completion_tokens : sha256(输出)` 做 **HMAC-SHA256** 签名。收据随回答帧与心跳一起上送，云端用同一把密钥重算同一签名即可验签 —— 于是**伪造收据**、**虚报 token 数**（12 个字的答案却报 5000 token）、**低熵垃圾输出**都能被识别，违规节点的信用分会被扣。**对您没有任何影响**：本地面板（**http://127.0.0.1:52415/ui**）照常使用，密钥绝不出您的机器；没有密钥的节点则直接不带上收据（云端按「无证明」处理，**绝不**当成欺诈）。
+
 **[EN]** **Your GPU now reports its own temperature and fan speed.** The node reads `nvidia-smi` non-blockingly on every heartbeat and over the live WebSocket channel, so the cloud knows exactly how hot your card is running — the local panel (**http://127.0.0.1:52415/ui**) shows **「GPU 温度」** next to the node's other vitals, turning amber when it climbs and red when it crosses the 75 °C overheat line. Machines **without** an NVIDIA card are perfectly fine: the reading simply shows as unavailable instead of guessing, and nothing ever blocks or breaks the heartbeat. For demos you can force a value with `APIPAW_MOCK_GPU_TEMP_C` / `APIPAW_MOCK_GPU_FAN_PCT`.
 
 **[CN]** **显卡自己会报温度和风扇转速了。** 节点在每次心跳与每条长连接上**非阻塞**读取 `nvidia-smi`，云端因此确切知道您的显卡跑到了多热 —— 本地面板（**http://127.0.0.1:52415/ui**）在节点状态一栏显示**「GPU 温度」**，温度升高时变琥珀色、越过 75 °C 过热线时变红。**没有 NVIDIA 独显**的机器完全不受影响：读数只会显示为「不可用」而不是瞎猜，心跳绝不会因此被阻塞或出错。做演示时可用 `APIPAW_MOCK_GPU_TEMP_C` / `APIPAW_MOCK_GPU_FAN_PCT` 强制注入数值。
@@ -76,7 +80,7 @@
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.16-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.17-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -84,7 +88,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.16-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.17-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -247,7 +251,7 @@ works.
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.16/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.17/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

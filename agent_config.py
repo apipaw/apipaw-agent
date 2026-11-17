@@ -36,6 +36,10 @@ except ImportError:  # pragma: no cover - 依赖缺失时降级为无校验模�
 
 CONFIG_FILE_NAME = "agent.config.json"
 
+# 原子替换的重试参数（Windows 目标文件被瞬时占用时会 WinError 5）
+_REPLACE_RETRY_ATTEMPTS = 20
+_REPLACE_RETRY_DELAY_SEC = 0.05
+
 # 客户端版本号（与心跳上报 / 云端注册表保持一致）
 # v1.0.9（阶段六 P2 · 模块 A4）：**断流**语义收紧 ——
 #   推理**跑到一半**后端挂掉（连接被掐 / 未收到 done 帧）⇒ 隧道回
@@ -97,7 +101,12 @@ CONFIG_FILE_NAME = "agent.config.json"
 #   ``gpu_temp_c`` / ``gpu_fan_pct``（nvidia-smi **一次调用**取全温度/风扇/显存），
 #   云端据此派生 ``overheat_warning``（阈值 75°C）并在业主节点卡片与智能告警中心
 #   展示；本机面板新增 GPU 温度 / 风扇徽标（高温高亮）。
-AGENT_VERSION = "1.0.16"
+#   （阶段十八 P0）：新增 **PoI 签名收据**（Proof-of-Inference）——
+#   每次推理完成后节点用 ``node_secret`` 对
+#   ``request_id:model_id:prompt_tokens:completion_tokens:sha256(output)``
+#   做 HMAC-SHA256 签名，随 ``RESPONSE_DONE`` 帧与 HTTP 心跳上送云端；
+#   云端据此识别伪造收据 / 虚报 token / 低熵垃圾。
+AGENT_VERSION = "1.0.17"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -347,7 +356,7 @@ class AgentConfig:
                 with open(tmp_path, "w", encoding="utf-8") as fh:
                     json.dump(data, fh, indent=4, ensure_ascii=False)
                     fh.write("\n")
-                os.replace(tmp_path, self._config_path)
+                self._atomic_replace(tmp_path)
                 print(f"[agent_config] 已保存配置: {self._config_path}")
             except Exception as exc:  # noqa: BLE001
                 print(f"[agent_config] 配置保存失败: {exc}")
@@ -356,6 +365,28 @@ class AgentConfig:
                         tmp_path.unlink()
                 except Exception:  # pragma: no cover
                     pass
+
+    def _atomic_replace(self, tmp_path: Path) -> None:
+        """把临时文件原子替换到目标路径（**对 Windows 的瞬时占用重试**）。
+
+        ⚠️ 历史坑（2026-11-18 复现）：Windows 上 ``os.replace`` 在目标文件
+        **正被其它句柄打开**（读方 / 杀软扫描 / 另一个线程）时会抛
+        ``[WinError 5] 拒绝访问`` —— 表现为「配置保存失败」，进而让
+        绑定 / 拉取模型的写回丢失（``test_phase13_p2_ollama`` 偶发红）。
+        这里做有限次重试（总窗口约 1s），把**瞬时占用**与**真失败**区分开。
+        """
+        last_exc: Optional[BaseException] = None
+        for attempt in range(_REPLACE_RETRY_ATTEMPTS):
+            try:
+                os.replace(tmp_path, self._config_path)
+                return
+            except PermissionError as exc:  # WinError 5 / 占用中
+                last_exc = exc
+                time.sleep(_REPLACE_RETRY_DELAY_SEC)
+            except OSError as exc:  # 其它 OS 错误：仍重试几次再放弃
+                last_exc = exc
+                time.sleep(_REPLACE_RETRY_DELAY_SEC)
+        raise last_exc if last_exc else OSError("atomic replace failed")
 
     # ───────────────────────── 公开 API ─────────────────────────
 

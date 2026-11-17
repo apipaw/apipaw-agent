@@ -66,6 +66,8 @@ RUNTIME_MODULES: Tuple[str, ...] = (
     "inference_backend.py",
     # v1.0.13（阶段十三 P2）：本机 Ollama 模型管理（免命令行拉取）—— main 必依赖它
     "ollama_local.py",
+    # v1.0.17（阶段十八 P0）：PoI 签名收据 —— ws_tunnel / telemetry 必依赖它
+    "receipt_signing.py",
 )
 
 # 一键脚本：Windows 用户主要用这三个

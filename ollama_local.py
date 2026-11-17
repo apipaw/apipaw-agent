@@ -243,13 +243,17 @@ class PullManager:
             self._finish(state="error", status=status, error=error,
                          completed=completed, total=total)
             return
-        self._finish(state="done", status=status or "success", error="",
-                     completed=completed, total=total)
+        # ⚠️ 顺序很重要：**先落盘再标记 done**。
+        # 此前是先 ``_finish(state="done")`` 再写配置 —— 于是「拉取已完成」
+        # 的状态会**早于**配置写盘落地，调用方（如面板轮询 / 阶段十三用例）
+        # 读到 done 时读到的还是旧配置 ⇒ 偶发「拉取成功但模型没绑上」。
         if on_success is not None:
             try:
                 on_success(model)
             except Exception as exc:  # noqa: BLE001 - 落盘失败不影响拉取结论
                 print("[ollama] 拉取成功但写入配置失败: %s" % exc)
+        self._finish(state="done", status=status or "success", error="",
+                     completed=completed, total=total)
 
     def _update(self, status: str = "", completed: int = 0, total: int = 0) -> None:
         with self._lock:

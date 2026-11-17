@@ -28,6 +28,7 @@ from agent_config import AGENT_VERSION, get_config
 import dispatch_crypto
 from console import enable_utf8_output
 import inference_backend
+import receipt_signing
 from telemetry import collect_gpu_metrics_cached
 from yield_monitor import get_yield_monitor
 
@@ -688,6 +689,42 @@ class WebSocketTunnel:
         resolved.pop("model_cipher", None)
         return resolved
 
+    def _attach_receipt(self, done_frame: Dict[str, Any], request_id: str,
+                        model_id: str, usage: Optional[Dict[str, Any]],
+                        output_text: str) -> Dict[str, Any]:
+        """给 ``RESPONSE_DONE`` 帧挂上 **PoI 签名收据**（阶段十八 P0）。
+
+        收据 = HMAC-SHA256(node_secret, "request_id:model_id:prompt:completion:sha256(output)")，
+        云端用同一密钥重算即可验签，从而识别**伪造收据 / 虚报 token / 低熵垃圾**。
+
+        ⚠️ 没有 ``node_secret`` ⇒ **不带** ``receipt`` 字段（绝不发假签名），
+        只打印一行提示，云端按"无收据"处理（不视为欺诈）。
+        """
+        secret = str(getattr(self._cfg, "node_secret", "") or "")
+        if not secret:
+            print("[ws_tunnel] 节点密钥缺失，本次推理不附带 PoI 签名收据 request_id=%s"
+                  % request_id)
+            return done_frame
+
+        prompt_tokens = 0
+        completion_tokens = 0
+        if isinstance(usage, dict):
+            try:
+                prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            except Exception:  # noqa: BLE001 - 畸形 usage ⇒ 0，不影响主流程
+                prompt_tokens = 0
+            try:
+                completion_tokens = int(usage.get("completion_tokens") or 0)
+            except Exception:  # noqa: BLE001
+                completion_tokens = 0
+
+        receipt = receipt_signing.sign_inference_receipt(
+            secret, request_id, model_id, prompt_tokens, completion_tokens, output_text)
+        done_frame["receipt"] = receipt
+        # 记住最近一张收据：HTTP 心跳兜底通道会带上它（PoI 的第二条投递路径）
+        receipt_signing.remember_receipt(receipt)
+        return done_frame
+
     async def _handle_inference_request(self, msg: Dict[str, Any]) -> None:
         """处理云端推理请求（阶段六 P0 · 模块 A：走**真实推理后端**）。
 
@@ -747,7 +784,8 @@ class WebSocketTunnel:
         url = f"http://127.0.0.1:{self._cfg.port}/v1/chat/completions"
 
         try:
-            ok, usage = await asyncio.to_thread(self._forward_stream, url, payload, request_id)
+            ok, usage, output_text = await asyncio.to_thread(
+                self._forward_stream, url, payload, request_id)
         except Exception as exc:  # noqa: BLE001
             print(f"[ws_tunnel] 本地 API 转发失败: {exc}")
             await self._send_json({
@@ -770,6 +808,9 @@ class WebSocketTunnel:
                 "[ws_tunnel] 上报真实 token 用量 request_id=%s prompt=%s completion=%s"
                 % (request_id, usage.get("prompt_tokens"), usage.get("completion_tokens"))
             )
+        # 阶段十八 P0：PoI 签名收据（模型 id 取**云端下发的** model，口径与云端一致）
+        self._attach_receipt(done_frame, request_id, str(payload.get("model") or ""),
+                             usage, output_text)
         await self._send_json(done_frame)
         print(f"[ws_tunnel] 推理请求完成 request_id={request_id}")
 
@@ -822,6 +863,8 @@ class WebSocketTunnel:
         # 阶段六 P2 · A4：已下发的分片数 —— 用来区分「**开跑前**就挂了」
         # 与「**跑到一半**断了」。两者对云端的语义完全不同（见下方 except 分支）。
         sent_chunks = 0
+        # 阶段十八 P0：累积**输出文本**（PoI 签名收据要对 sha256(输出) 签名）
+        output_parts: list = []
         print("[ws_tunnel] 调用推理后端 %s model=%s request_id=%s"
               % (getattr(backend, "name", "?"), model, request_id))
 
@@ -844,6 +887,7 @@ class WebSocketTunnel:
                     if perf_first_at is None:
                         perf_first_at = time.time()
                     sent_chunks += 1
+                    output_parts.append(chunk.text)
                     await self._send_json({
                         "type": TYPE_RESPONSE_CHUNK,
                         "request_id": request_id,
@@ -934,16 +978,21 @@ class WebSocketTunnel:
             done_frame["perf"] = perf
             print("[ws_tunnel] 上报真实性能读数 request_id=%s ttft=%sms tps=%s"
                   % (request_id, perf.get("ttft_ms"), perf.get("throughput_tps")))
+        # 阶段十八 P0：PoI 签名收据（model id 取**云端下发的** model，与云端口径一致）
+        self._attach_receipt(done_frame, request_id,
+                             requested_model or str(model or ""),
+                             usage, "".join(output_parts))
         await self._send_json(done_frame)
         print(f"[ws_tunnel] 推理请求完成 request_id={request_id}")
 
     def _forward_stream(
         self, url: str, payload: Dict[str, Any], request_id: str
-    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
         """同步实现：把本地 SSE 响应分块回传云端（在工作线程中执行，不阻塞事件循环）。
 
-        返回 ``(是否成功, 本地上报的真实 usage)``。本地推理若带回了 usage
+        返回 ``(是否成功, 本地上报的真实 usage, 输出文本)``。本地推理若带回了 usage
         （OpenAI 规范的结束帧或任意 chunk 的 usage 字段），这里原样透传给云端。
+        输出文本用于**阶段十八 P0 的 PoI 签名收据**（对 ``sha256(输出)`` 签名）。
 
         阶段六 P0 · 模块 A 的两处修正：
         1. **强制 ``stream=True``** —— 原先原样透传载荷，云端若下发非流式载荷
@@ -956,6 +1005,8 @@ class WebSocketTunnel:
         # 阶段六 P2 · A4：已下发的分片数（区分「开跑前挂」与「跑一半断」）
         sent_chunks = 0
         saw_done = False
+        # 阶段十八 P0：累积**输出文本**（PoI 签名收据要对 sha256(输出) 签名）
+        parts: list = []
         forced_payload = dict(payload or {})
         forced_payload["stream"] = True
         try:
@@ -973,7 +1024,7 @@ class WebSocketTunnel:
                         "status": resp.status_code,
                         "error": f"local_api_error_{resp.status_code}",
                     })
-                    return False, None
+                    return False, None, ""
                 # 本地 API 自报"这是占位实现" ⇒ 明确失败，绝不把占位文本当真答案。
                 mode = ""
                 try:
@@ -989,7 +1040,7 @@ class WebSocketTunnel:
                         "status": 502,
                         "error": "backend_unavailable",
                     })
-                    return False, None
+                    return False, None, ""
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data: "):
                         continue
@@ -1004,6 +1055,15 @@ class WebSocketTunnel:
                     chunk_usage = chunk.get("usage")
                     if isinstance(chunk_usage, dict) and chunk_usage:
                         usage = chunk_usage
+                    # 阶段十八 P0：累积 delta.content（PoI 收据要对**完整输出**签名）
+                    try:
+                        choices = chunk.get("choices") or []
+                        delta = (choices[0] or {}).get("delta") or {}
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            parts.append(content)
+                    except Exception:  # noqa: BLE001 - 分片形状异常不影响转发
+                        pass
                     sent_chunks += 1
                     self._send_json_threadsafe({
                         "type": TYPE_RESPONSE_CHUNK,
@@ -1021,7 +1081,7 @@ class WebSocketTunnel:
                         "status": 502,
                         "error": "backend_stream_broken",
                     })
-                    return False, None
+                    return False, None, ""
         except requests.exceptions.ConnectionError as exc:
             # 本地推理服务压根不在 ⇒ 节点等于**没有推理引擎** ⇒ 明确报错。
             # ⚠️ 状态码 502（不是 503）：503 在云端语义是"节点让退/繁忙"，
@@ -1037,7 +1097,7 @@ class WebSocketTunnel:
                 "error": "backend_stream_broken" if sent_chunks > 0
                          else "backend_unavailable",
             })
-            return False, None
+            return False, None, ""
         except requests.exceptions.Timeout:
             print(f"[ws_tunnel] 本地 API 超时 request_id={request_id}")
             self._send_json_threadsafe({
@@ -1047,7 +1107,7 @@ class WebSocketTunnel:
                 "error": "backend_stream_broken" if sent_chunks > 0
                          else "local_api_timeout",
             })
-            return False, None
+            return False, None, ""
         except Exception as exc:  # noqa: BLE001
             print(f"[ws_tunnel] 本地 API 转发失败: {exc}")
             self._send_json_threadsafe({
@@ -1057,8 +1117,8 @@ class WebSocketTunnel:
                 "error": "backend_stream_broken" if sent_chunks > 0
                          else f"local_api_error: {exc}",
             })
-            return False, None
-        return True, usage
+            return False, None, ""
+        return True, usage, "".join(parts)
 
     def _send_json_threadsafe(self, data: Dict[str, Any]) -> None:
         """从工作线程发送消息（投递到事件循环线程执行）。"""

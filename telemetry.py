@@ -33,6 +33,7 @@ else:
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
+import receipt_signing
 from yield_monitor import NodeState, get_yield_monitor
 
 enable_utf8_output()
@@ -341,6 +342,10 @@ class TelemetryReporter:
             "platform": platform.system(),
             "uptime_seconds": round(time.time() - _process_start_time(), 1),
             "timestamp": int(time.time()),
+            # 阶段十八 P0：最近一张 **PoI 签名收据**（HTTP 兜底通道的投递路径）。
+            # WS 在线时收据随 ``RESPONSE_DONE`` 帧直达云端；WS 掉线期间
+            # 由本字段补位。云端按同一密钥重算即可验签。
+            "receipt": receipt_signing.last_receipt(),
         }
         # 阶段七 P1：**模型信息**必须随心跳上报。
         # 此前 HTTP 心跳只带 ``model_name``，云端拿不到"本地到底装了哪些模型"

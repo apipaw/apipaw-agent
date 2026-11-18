@@ -19,6 +19,18 @@
 
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** **Two small machines in your living room now add up to one big machine.** The new **Pipeline Mesh** probes the other nodes on your local network, measures their round-trip time and asks how much VRAM they have — and only merges with peers that answer (a peer over **25 ms** away, unreachable, or silent about its VRAM is dropped, never guessed at). Two 6 GB nodes therefore present themselves to the cloud as a **12 GB** cluster, and an 80-layer model is split across them as **L0-39 / L40-79**. The cloud uses the **larger** of "this machine's VRAM" and "the cluster's VRAM" when it checks whether your node may serve a demanding model, so a 12 GB model now reaches a pair of 6 GB boxes instead of nobody. Everything is configured in the local panel (**http://127.0.0.1:52415/ui**) under **「🔗 Pipeline Mesh 局域网多机显存合体」**, and the cloud publishes the resulting topology for everyone to see.
+
+**[CN]** **客厅里的两台小机器，现在能当成一台大机器用。** 新增的 **Pipeline Mesh（局域网张量切片合体）** 会探测局域网内的其它节点，测它们的往返延迟、问清楚它们有多少显存 —— 只与**答得上话**的节点合体：往返超过 **25 ms**、连不上、或者**没上报显存**的节点一律剔除，绝不把「未知」当成「有」。于是两台 6GB 节点向云端呈现为 **12GB** 集群，80 层模型被切成 **L0-39 / L40-79** 两片。云端判断「这台机器能不能接大模型」时取**单机显存与集群显存的较大者**，于是 12GB 门槛的模型终于能派到两台 6GB 小机器头上，而不是谁都接不了。全部配置在本地面板（**http://127.0.0.1:52415/ui**）的 **「🔗 Pipeline Mesh 局域网多机显存合体」** 区块里完成，合出来的拓扑会公开公示。
+
+**[EN]** **Macs are first-class now.** On macOS the node reads the system's own **`HIDIdleTime`** counter (`ioreg -c IOHIDSystem`, nanoseconds) to decide when you touched the keyboard — so the **50 ms yield** guarantee ("get out of the way the moment the human starts typing") holds on Apple Silicon exactly as it does on Windows. The same run detects the chip (`sysctl -n machdep.cpu.brand_string`) and the unified memory (`sysctl -n hw.memsize`), and reports the unified memory as usable VRAM at **75 %** — an M-series box with 16 GB is treated as a 12 GB node. On a Mac with no separate GPU the temperature reading simply shows as unavailable; nothing breaks and nothing is faked.
+
+**[CN]** **Mac 现在也是一等公民。** 在 macOS 上，节点直接读系统自带的 **`HIDIdleTime`** 计数器（`ioreg -c IOHIDSystem`，单位纳秒）来判断您有没有碰键盘 —— 于是「人一动手就立刻让退」的 **50 ms** 承诺，在苹果芯片上和 Windows 一样成立。同一轮探测还会识别芯片（`sysctl -n machdep.cpu.brand_string`）与统一内存（`sysctl -n hw.memsize`），并按 **75%** 折算成可用显存上报 —— 16GB 统一内存的 M 系列机器会被当作 12GB 节点。没有独立显卡的 Mac，温度读数只会显示为不可用，既不报错也不瞎猜。
+
+**[EN]** **The node survives a gateway outage on its own.** Add backup gateway URLs in the panel (**「多网关主备容灾」**) and the node will automatically switch to a backup when the primary answers **502 / 503 / 504** (or the connection drops) — but only after three consecutive failures, so a single hiccup never moves you. **4xx never triggers a switch**: a request that was simply wrong stays on the primary, because the gateway is fine. Once the primary recovers, the node probes it and **switches back on its own**. The current gateway (primary or backup) is shown in the panel and travels with every heartbeat, so the console always knows which gateway a node is really talking to.
+
+**[CN]** **网关挂了，节点自己会绕过去。** 在面板里填上备用网关地址（**「多网关主备容灾」**），主网关返回 **502 / 503 / 504**（或连接断开）时，节点会自动切到备用 —— 但要**连续失败三次**才切，一次抖动绝不会把您挪走。**4xx 绝不触发切换**：请求本身不对说明网关是好的，就留在主网关上。主网关恢复后，节点会主动探测并**自动切回**。当前生效的是主还是备，会显示在面板里、并随每次心跳上报，控制台因此永远知道这台节点究竟在跟哪个网关说话。
+
 **[EN]** **Your node now signs its own answers — the cloud can finally tell real work from fakes.** Every finished inference is stamped with a **Proof-of-Inference receipt**: the node hashes the exact text it produced (`SHA-256`) and signs `request_id : model_id : prompt_tokens : completion_tokens : sha256(output)` with **HMAC-SHA256** using your node's own secret. The receipt travels with the answer frame and with the heartbeat, and the cloud re-computes the same signature with the same key — so **forged receipts**, **inflated token counts** (claiming 5 000 tokens for a 12-character answer) and **low-entropy garbage** can all be spotted and the offender's credit score can be docked. Nothing changes for you: the panel (**http://127.0.0.1:52415/ui**) works exactly as before, the secret never leaves your machine, and a node without a secret simply sends no receipt (treated as "no proof", never as fraud).
 
 **[CN]** **节点现在会给自己的答案签名 —— 云端终于能分辨真干活与造假。** 每次推理结束都会打上一枚 **PoI（Proof-of-Inference）签名收据**：节点先对**自己产出的原文**做 `SHA-256`，再用**节点密钥**对 `request_id : model_id : prompt_tokens : completion_tokens : sha256(输出)` 做 **HMAC-SHA256** 签名。收据随回答帧与心跳一起上送，云端用同一把密钥重算同一签名即可验签 —— 于是**伪造收据**、**虚报 token 数**（12 个字的答案却报 5000 token）、**低熵垃圾输出**都能被识别，违规节点的信用分会被扣。**对您没有任何影响**：本地面板（**http://127.0.0.1:52415/ui**）照常使用，密钥绝不出您的机器；没有密钥的节点则直接不带上收据（云端按「无证明」处理，**绝不**当成欺诈）。
@@ -80,7 +92,7 @@
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.17-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.18-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -88,7 +100,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.17-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.18-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -251,7 +263,7 @@ works.
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.17/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.18/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

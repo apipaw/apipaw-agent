@@ -68,6 +68,10 @@ RUNTIME_MODULES: Tuple[str, ...] = (
     "ollama_local.py",
     # v1.0.17（阶段十八 P0）：PoI 签名收据 —— ws_tunnel / telemetry 必依赖它
     "receipt_signing.py",
+    # v1.0.18（阶段二十 P0/P2）：局域网 Pipeline Mesh 合体探测 + 多网关主备容灾
+    # —— telemetry / ws_tunnel 必依赖这两个模块，漏了直接 import 失败
+    "mesh_cluster.py",
+    "gateway_failover.py",
 )
 
 # 一键脚本：Windows 用户主要用这三个

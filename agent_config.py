@@ -20,7 +20,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from console import enable_utf8_output
 
@@ -106,7 +106,15 @@ _REPLACE_RETRY_DELAY_SEC = 0.05
 #   ``request_id:model_id:prompt_tokens:completion_tokens:sha256(output)``
 #   做 HMAC-SHA256 签名，随 ``RESPONSE_DONE`` 帧与 HTTP 心跳上送云端；
 #   云端据此识别伪造收据 / 虚报 token / 低熵垃圾。
-AGENT_VERSION = "1.0.17"
+# v1.0.18（阶段二十 P0/P1/P2）：**局域网多机张量切片合体 + macOS 原生适配 +
+#   多网关主备自动容灾** ——
+#   · 新增 ``mesh_cluster.py``（Pipeline Mesh：局域网多机显存合体与层切片分配）；
+#     配置项 ``mesh_peers`` / ``mesh_enabled`` / ``mesh_mode`` /
+#     ``mesh_max_rtt_ms`` / ``mesh_total_layers``；
+#   · 心跳与 WS 帧新增 ``mesh_enabled`` / ``cluster_vram_gb`` / ``mesh_shards`` /
+#     ``mesh_rtt_ms`` / ``mesh_peers_count`` / ``layer_splits``；
+#   · 新增 ``backup_gateway_urls``（多网关主备）+ ``gateway_failover_threshold``。
+AGENT_VERSION = "1.0.18"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -177,6 +185,26 @@ class AgentConfigModel(BaseModel):
     # OpenAI 兼容后端的可选 API Key（vLLM --api-key / llama.cpp --api-key）。
     backend_api_key: str = ""
 
+    # ── 阶段二十 P0 · 局域网 Pipeline Mesh（多机显存合体）────
+    # 协同节点列表，形如 ``["192.168.1.102:52415"]``（同局域网另一台 Agent）。
+    # 留空 = 不组网（默认，绝不影响既有单机行为）。
+    mesh_peers: List[str] = Field(default_factory=list)
+    # 是否**启用**合体（面板可勾选，热生效）。
+    mesh_enabled: bool = False
+    # 分片模式：Pipeline Shards（张量切片）/ llama.cpp RPC。
+    mesh_mode: str = "Pipeline Shards"
+    # 局域网合体的 RTT 上限（毫秒）—— 超过就不合体。
+    mesh_max_rtt_ms: float = Field(default=25.0, ge=1.0, le=1000.0)
+    # 切层基准：模型总层数（80 层模型按各节点显存比例切分）。
+    mesh_total_layers: int = Field(default=80, ge=8, le=4096)
+
+    # ── 阶段二十 P2 · 多网关主备容灾 ────────────────────────
+    # 备用网关地址列表（不含主网关）。主网关连续失败或返回 502/503/504 时
+    # 自动故障转移；主网关恢复后切回。留空 = 单网关（行为完全不变）。
+    backup_gateway_urls: List[str] = Field(default_factory=list)
+    # 连续失败多少次才切到备用网关（避免一次网络抖动就搬家）。
+    gateway_failover_threshold: int = Field(default=3, ge=1, le=100)
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "host": "127.0.0.1",
@@ -210,6 +238,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "backend_vllm_base_url": "",
     "backend_llamacpp_base_url": "",
     "backend_api_key": "",
+    "mesh_peers": [],
+    "mesh_enabled": False,
+    "mesh_mode": "Pipeline Shards",
+    "mesh_max_rtt_ms": 25.0,
+    "mesh_total_layers": 80,
+    "backup_gateway_urls": [],
+    "gateway_failover_threshold": 3,
 }
 
 
@@ -535,6 +570,42 @@ class AgentConfig:
     @property
     def backend_api_key(self) -> str:
         return self._model.backend_api_key
+
+    # ── 阶段二十 P0 · Pipeline Mesh ───────────────────────
+    @property
+    def mesh_peers(self) -> List[str]:
+        value = getattr(self._model, "mesh_peers", []) or []
+        if isinstance(value, str):
+            return [p.strip() for p in value.split(",") if p.strip()]
+        return [str(p).strip() for p in value if str(p).strip()]
+
+    @property
+    def mesh_enabled(self) -> bool:
+        return bool(getattr(self._model, "mesh_enabled", False))
+
+    @property
+    def mesh_mode(self) -> str:
+        return str(getattr(self._model, "mesh_mode", "Pipeline Shards") or "Pipeline Shards")
+
+    @property
+    def mesh_max_rtt_ms(self) -> float:
+        return float(getattr(self._model, "mesh_max_rtt_ms", 25.0) or 25.0)
+
+    @property
+    def mesh_total_layers(self) -> int:
+        return int(getattr(self._model, "mesh_total_layers", 80) or 80)
+
+    # ── 阶段二十 P2 · 多网关容灾 ─────────────────────────
+    @property
+    def backup_gateway_urls(self) -> List[str]:
+        value = getattr(self._model, "backup_gateway_urls", []) or []
+        if isinstance(value, str):
+            return [p.strip() for p in value.split(",") if p.strip()]
+        return [str(p).strip() for p in value if str(p).strip()]
+
+    @property
+    def gateway_failover_threshold(self) -> int:
+        return int(getattr(self._model, "gateway_failover_threshold", 3) or 3)
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return (

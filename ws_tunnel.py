@@ -20,14 +20,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import socket
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 from agent_config import AGENT_VERSION, get_config
 import dispatch_crypto
 from console import enable_utf8_output
+import gateway_failover
 import inference_backend
+import mesh_cluster
 import receipt_signing
 from telemetry import collect_gpu_metrics_cached
 from yield_monitor import get_yield_monitor
@@ -145,6 +149,14 @@ class WebSocketTunnel:
     def __init__(self) -> None:
         self._cfg = get_config()
         self._ws_url = self._cfg.cloud_ws_url
+        # 阶段二十 P2：多网关主备容灾 —— 主网关连续失败 / 网关层错误时
+        # 自动切到备用网关，主网关恢复后切回。
+        self._failover = gateway_failover.GatewayFailover(
+            primary_url=self._ws_url,
+            backup_urls=[gateway_failover.to_ws_url(u)
+                         for u in (getattr(self._cfg, "backup_gateway_urls", []) or [])],
+            threshold=int(getattr(self._cfg, "gateway_failover_threshold", 3) or 3),
+        )
         self._node_id = self._cfg.node_id
         self._node_secret = self._cfg.node_secret
 
@@ -361,15 +373,23 @@ class WebSocketTunnel:
             self._reconnect_event = asyncio.Event()
             established = False
             try:
-                print(f"[ws_tunnel] 正在连接云端: {self._ws_url}")
+                # 阶段二十 P2：连接目标取自**容灾状态机**（可能是备用网关）
+                target_url = self._failover.current_url or self._ws_url
+                print(f"[ws_tunnel] 正在连接云端: {target_url}")
                 kwargs = _connect_kwargs(self._build_auth_headers())
-                async with websockets.connect(self._ws_url, **kwargs) as ws:
+                async with websockets.connect(target_url, **kwargs) as ws:
                     established = True
                     self._ws = ws
                     self._connected = True
                     self._current_delay = self._base_delay  # 重置退避延迟
                     self._last_server_activity = time.time()
                     self._server_app_ping_seen = False
+                    # 连接成功 ⇒ 清零失败计数；若跑在备用网关上，探测主网关
+                    # 是否已恢复（恢复则切回）。
+                    switched_back = self._failover.record_success(
+                        primary_probe=self._primary_gateway_reachable)
+                    if switched_back:
+                        print("[ws_tunnel] 🔁 主网关已恢复，切回主网关")
                     print("[ws_tunnel] ✅ WebSocket 已连接")
                     await self._send_init()
                     self._hb_task = self._loop.create_task(self._heartbeat_loop())
@@ -416,6 +436,10 @@ class WebSocketTunnel:
                 # 握手前失败（边缘层拒绝/握手超时）**不翻倍退避**：
                 # 连续快速重试能在同样的空窗里挤出更多次尝试（DAY14 实测 CF 会连续拒 3~4 次）。
                 phase = "握手阶段" if not established else "连接阶段"
+                # 阶段二十 P2：连接失败计入容灾状态机（连续失败达阈值 ⇒ 切备机）
+                if self._failover.record_failure():
+                    print(f"[ws_tunnel] 🔀 主网关连续失败，已切换到备用网关: "
+                          f"{self._failover.current_url}")
                 print(f"[ws_tunnel] 连接异常（{phase}）: {exc}，"
                       f"{self._current_delay:.1f}s 后重连...")
                 await self._wait_backoff(self._current_delay)
@@ -559,6 +583,8 @@ class WebSocketTunnel:
         # 采集失败时各字段为 None ⇒ 云端视为「显存未知」，
         #    保持旧口径结算（不会因缺数据而降薪）。
         gpu = collect_gpu_metrics_cached()
+        # 阶段二十 P0：局域网 Pipeline Mesh 状态（合体显存 / 分片数 / 层切片表）
+        mesh = mesh_cluster.mesh_status_from_config(cfg)
         return {
             "type": frame_type,
             "node_id": cfg.node_id,
@@ -594,12 +620,59 @@ class WebSocketTunnel:
             # 云端据此**自动合并**进注册表的模型清单（消灭手工绑模型的痛点）。
             "model_name": str(getattr(self._cfg, "model_name", "") or ""),
             "backend_model": str(getattr(self._cfg, "backend_model", "") or ""),
+            # ── 阶段二十 P0 · Pipeline Mesh（局域网多机显存合体）──
+            "mesh_enabled": bool(mesh.get("mesh_enabled")),
+            "cluster_vram_gb": mesh.get("cluster_vram_gb"),
+            "mesh_shards": mesh.get("mesh_shards"),
+            "mesh_rtt_ms": mesh.get("mesh_rtt_ms"),
+            "mesh_peers_count": mesh.get("mesh_peers_count"),
+            "layer_splits": mesh.get("layer_splits") or [],
+            # 阶段二十 P2：多网关容灾状态（当前跑在哪个网关上）
+            # ⚠️ 用 ``getattr`` 取：单测会绕过 ``__init__`` 造实例（``object.__new__``），
+            #    此时没有 ``_failover`` —— 缺字段只降级成空快照，绝不让心跳帧崩掉。
+            "gateway_status": self._gateway_status_snapshot(),
         }
 
     def _backend_label(self) -> str:
         """当前推理后端类型（无后端 ⇒ 空串）。"""
         backend = inference_backend.get_backend(self._cfg)
         return getattr(backend, "name", "") if backend is not None else ""
+
+    def _gateway_status_snapshot(self) -> Dict[str, Any]:
+        """多网关容灾状态快照（缺容灾器时返回空快照，不抛异常）。"""
+        failover = getattr(self, "_failover", None)
+        if failover is None:
+            return {
+                "gateway_url": getattr(self, "_ws_url", "") or "",
+                "gateway_index": 0,
+                "gateway_count": 0,
+                "gateway_is_backup": False,
+                "gateways": [],
+            }
+        try:
+            return failover.status()
+        except Exception as exc:  # noqa: BLE001 - 状态快照失败不能拖垮心跳
+            print(f"[ws_tunnel] 读取网关容灾状态失败: {exc}")
+            return {"gateway_url": "", "gateway_index": 0, "gateway_count": 0,
+                    "gateway_is_backup": False, "gateways": []}
+
+    def _primary_gateway_reachable(self) -> bool:
+        """探测**主网关**是否已恢复（TCP 连接即可，廉价）。
+
+        只在当前跑在备用网关时才会被调用（见
+        :meth:`gateway_failover.GatewayFailover.record_success`）。
+        """
+        url = getattr(self._failover, "_primary", "") or self._ws_url
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+            if not host:
+                return False
+            with socket.create_connection((host, port), timeout=1.5):
+                return True
+        except Exception:  # noqa: BLE001 - 探测失败 = 主网关还不行
+            return False
 
     def _local_models(self) -> list:
         """本地可用模型清单（带 60s 缓存，避免每次心跳都打后端）。"""
@@ -1203,6 +1276,16 @@ def is_ws_connected() -> bool:
     return bool(_tunnel_instance and _tunnel_instance.is_connected())
 
 
+def get_ws_tunnel() -> Optional[WebSocketTunnel]:
+    """取全局 WS 隧道单例（未启动 ⇒ ``None``）。
+
+    阶段二十 P2：面板要读「当前跑在哪个网关 / 是否已切备」，
+    这里给出只读入口，避免面板去碰隧道内部状态。
+    """
+    with _tunnel_lock:
+        return _tunnel_instance
+
+
 def reload_tunnel_credentials(wait_seconds: float = 8.0) -> Dict[str, Any]:
     """
     通知全局 WS 隧道热更新凭证并平滑重连（供本地配置面板调用）。
@@ -1224,6 +1307,7 @@ def reload_tunnel_credentials(wait_seconds: float = 8.0) -> Dict[str, Any]:
 __all__ = [
     "WebSocketTunnel",
     "start_ws_tunnel",
+    "get_ws_tunnel",
     "stop_ws_tunnel",
     "is_ws_connected",
     "reload_tunnel_credentials",

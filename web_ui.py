@@ -430,6 +430,49 @@ UI_HTML = r"""<!DOCTYPE html>
         <div class="status" id="prefsStatus">偏好未改动</div>
       </div>
 
+      <!-- 阶段二十 P0/P2：局域网 Pipeline Mesh 合体 + 多网关容灾 -->
+      <div class="section">
+        <div class="section-title">🔗 Pipeline Mesh 局域网多机显存合体</div>
+        <div class="status" id="meshStatus">探测局域网协同节点…</div>
+
+        <div class="field">
+          <label for="meshPeers">协同节点列表（host:port，逗号分隔）</label>
+          <input id="meshPeers" type="text" placeholder="192.168.1.102:52415, 192.168.1.103:52415" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label class="check" for="meshEnabled">
+            <input id="meshEnabled" type="checkbox" />
+            <span>
+              启用多机张量切片合体
+              <span class="check-desc">
+                局域网内多台小显存 PC 按显存比例切分模型层（如 2×6GB 切 80 层为 L0-39 / L40-79），
+                合成一台大显存节点承接高门槛模型。
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <div class="field">
+          <label for="meshMode">分片模式</label>
+          <input id="meshMode" type="text" placeholder="Pipeline Shards" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label for="meshRtt">合体 RTT 上限（毫秒）</label>
+          <input id="meshRtt" type="text" placeholder="25" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label for="backupGateways">备用网关地址（逗号分隔）</label>
+          <input id="backupGateways" type="text" placeholder="https://backup.apipaw.com" autocomplete="off" spellcheck="false" />
+        </div>
+
+        <button class="primary" id="saveMesh">保存并探测</button>
+        <div class="status" id="meshSaveStatus">—</div>
+        <div class="ollama-list" id="meshSplits"></div>
+      </div>
+
       <!-- 阶段十三 P2：免命令行 Ollama 模型管理 -->
       <div class="section">
         <div class="section-title">本地 Ollama 模型管理 · 云端推荐一键同步</div>
@@ -494,6 +537,12 @@ UI_HTML = r"""<!DOCTYPE html>
   var submitEl = $("submit"), toggleEl = $("toggle"), dotEl = $("dot"), connText = $("connText");
   var backendModelEl = $("backendModel"), forceIdleEl = $("forceIdle");
   var savePrefsEl = $("savePrefs"), prefsStatusEl = $("prefsStatus");
+  // 阶段二十 P0/P2：Pipeline Mesh 与多网关容灾
+  var meshPeersEl = $("meshPeers"), meshEnabledEl = $("meshEnabled");
+  var meshModeEl = $("meshMode"), meshRttEl = $("meshRtt");
+  var backupGatewaysEl = $("backupGateways");
+  var saveMeshEl = $("saveMesh"), meshSaveStatusEl = $("meshSaveStatus");
+  var meshStatusEl = $("meshStatus"), meshSplitsEl = $("meshSplits");
 
   function say(text, kind) {
     statusEl.textContent = text;
@@ -562,6 +611,25 @@ UI_HTML = r"""<!DOCTYPE html>
         }
         if (typeof s.force_idle === "boolean" && !forceIdleEl.dataset.touched) {
           forceIdleEl.checked = s.force_idle;
+        }
+        // 阶段二十 P0/P2：预填 Mesh / 多网关容灾配置并渲染分片拓扑
+        if (!meshPeersEl.dataset.touched && Array.isArray(s.mesh_peers)) {
+          meshPeersEl.value = s.mesh_peers.join(", ");
+        }
+        if (typeof s.mesh_enabled === "boolean" && !meshEnabledEl.dataset.touched) {
+          meshEnabledEl.checked = s.mesh_enabled;
+        }
+        if (!meshModeEl.dataset.touched && typeof s.mesh_mode === "string" && s.mesh_mode) {
+          meshModeEl.value = s.mesh_mode;
+        }
+        if (!meshRttEl.dataset.touched && typeof s.mesh_max_rtt_ms === "number") {
+          meshRttEl.value = String(s.mesh_max_rtt_ms);
+        }
+        if (!backupGatewaysEl.dataset.touched && Array.isArray(s.backup_gateway_urls)) {
+          backupGatewaysEl.value = s.backup_gateway_urls.join(", ");
+        }
+        if (s.mesh) {
+          renderMesh(Object.assign({}, s.mesh, s.gateway || {}));
         }
         return s;
       })
@@ -641,6 +709,104 @@ UI_HTML = r"""<!DOCTYPE html>
         sayPrefs("请求失败：" + e.message, "err");
       })
       .finally(function () { savePrefsEl.disabled = false; });
+  });
+
+  // ── 阶段二十 P0/P2：Pipeline Mesh 合体 + 多网关容灾 ──
+  function sayMesh(text, kind) {
+    meshSaveStatusEl.textContent = text;
+    meshSaveStatusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function renderMesh(mesh) {
+    if (!mesh) { return; }
+    var enabled = !!mesh.mesh_enabled;
+    var peers = mesh.mesh_peers_count || 0;
+    var vram = Number(mesh.cluster_vram_gb || 0);
+    var shards = mesh.mesh_shards || 0;
+    var rtt = Number(mesh.mesh_rtt_ms || 0);
+    var lines = [];
+    if (enabled && shards > 0) {
+      lines.push("✅ 合体中：" + shards + " 节点 · 聚合显存 " + vram.toFixed(1)
+        + " GB · 局域网 RTT " + rtt.toFixed(1) + " ms");
+    } else if (enabled) {
+      lines.push("⏳ 已启用但尚未组成合规集群（未探测到 RTT < 上限的协同节点）");
+    } else {
+      lines.push("⛔ 合体未启用");
+    }
+    if (mesh.rejected_peers && mesh.rejected_peers.length) {
+      lines.push("⚠️ 已剔除节点：" + mesh.rejected_peers.length + " 个（不可达 / RTT 超限 / 显存未知）");
+    }
+    if (mesh.gateway_url) {
+      lines.push((mesh.gateway_is_backup ? "🔀 当前运行在备用网关：" : "🌐 当前网关：")
+        + mesh.gateway_url
+        + (mesh.gateway_count > 1 ? "（共 " + mesh.gateway_count + " 个候选）" : ""));
+    }
+    meshStatusEl.textContent = lines.join(" ｜ ") || "—";
+    meshStatusEl.className = "status" + (enabled && shards > 0 ? " ok" : "");
+
+    var splits = mesh.layer_splits || [];
+    var html = "";
+    for (var i = 0; i < splits.length; i++) {
+      var sp = splits[i];
+      html += '<div class="ollama-item"><span>' + (sp.label || ("节点 " + (i + 1)))
+        + ' · ' + (sp.layer_start !== undefined
+            ? ("L" + sp.layer_start + "-" + sp.layer_end)
+            : (sp.layers !== undefined ? (sp.layers + " 层") : "—"))
+        + ' · ' + Number(sp.vram_gb || 0).toFixed(1) + ' GB'
+        + (sp.rtt_ms !== undefined && sp.rtt_ms !== null
+            ? ' · RTT ' + Number(sp.rtt_ms).toFixed(1) + ' ms' : "")
+        + '</span></div>';
+    }
+    meshSplitsEl.innerHTML = html || '<div class="ollama-item"><span>暂无分片方案</span></div>';
+  }
+
+  meshPeersEl.addEventListener("input", function () { meshPeersEl.dataset.touched = "1"; });
+  meshEnabledEl.addEventListener("change", function () { meshEnabledEl.dataset.touched = "1"; });
+  meshModeEl.addEventListener("input", function () { meshModeEl.dataset.touched = "1"; });
+  meshRttEl.addEventListener("input", function () { meshRttEl.dataset.touched = "1"; });
+  backupGatewaysEl.addEventListener("input", function () { backupGatewaysEl.dataset.touched = "1"; });
+
+  function splitList(text) {
+    var out = [];
+    var parts = String(text || "").split(/[,;\n\r]+/);
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].trim();
+      if (p) { out.push(p); }
+    }
+    return out;
+  }
+
+  saveMeshEl.addEventListener("click", function () {
+    saveMeshEl.disabled = true;
+    sayMesh("正在保存并探测局域网协同节点…", "wait");
+
+    var rtt = parseFloat(meshRttEl.value || "");
+    var body = {
+      mesh_peers: splitList(meshPeersEl.value),
+      mesh_enabled: !!meshEnabledEl.checked,
+      mesh_mode: (meshModeEl.value || "").trim() || "Pipeline Shards",
+      backup_gateway_urls: splitList(backupGatewaysEl.value)
+    };
+    if (!isNaN(rtt)) { body.mesh_max_rtt_ms = rtt; }
+
+    fetch("/api/mesh/prefs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.body || !res.body.ok) {
+          sayMesh((res.body && res.body.message) || "保存失败", "err");
+          return;
+        }
+        renderMesh(res.body.mesh);
+        sayMesh("已保存并生效", "ok");
+      })
+      .catch(function (e) {
+        sayMesh("请求失败：" + e.message, "err");
+      })
+      .finally(function () { saveMeshEl.disabled = false; });
   });
 
   // ── 阶段十三 P2：免命令行 Ollama 模型管理 ──

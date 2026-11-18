@@ -222,8 +222,8 @@ def main() -> int:
         "temp=%r fan=%r" % (payload.get("gpu_temp_c"), payload.get("gpu_fan_pct")),
     )
     _record(
-        "Agent 版本已升到 1.0.17",
-        str(payload.get("agent_version")) == "1.0.17",
+        "Agent 版本已升到 1.0.18",
+        str(payload.get("agent_version")) == "1.0.18",
         "version=%r" % payload.get("agent_version"),
     )
 

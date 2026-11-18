@@ -9,7 +9,9 @@ telemetry.py — 节点遥测与心跳上报
 指标采集策略（按优先级）：
 1. ``nvidia-smi`` 子进程 —— 不依赖 torch，Windows / Linux 通用
 2. ``torch.cuda`` —— 已安装 torch 时使用
-3. 兜底返回 ``None``，心跳照常上报（字段缺失而非报错）
+3. **macOS Apple Silicon 统一内存**（阶段二十 P1）—— ``sysctl hw.memsize``
+   按 75% 可分配比例折算显存
+4. 兜底返回 ``None``，心跳照常上报（字段缺失而非报错）
 """
 
 from __future__ import annotations
@@ -18,10 +20,12 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import threading
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 try:
     import requests
@@ -33,6 +37,8 @@ else:
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
+import gateway_failover
+import mesh_cluster
 import receipt_signing
 from yield_monitor import NodeState, get_yield_monitor
 
@@ -58,6 +64,110 @@ _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+# --------------------------------------------------------------------------
+# 阶段二十 P1 · macOS Apple Silicon 统一内存探测
+# --------------------------------------------------------------------------
+#
+# 苹果芯片没有独立显存，**统一内存**（Unified Memory）由 CPU 与 GPU 共享。
+# 云端按显存判能力等级（阶段五 P1 硬件门槛）⇒ 必须给出一个"可用显存"。
+# 取 **75%** 作为可分配比例（系统 + GPU 驱动 + 用户态至少要占掉四分之一，
+# 这也是 llama.cpp / MLX 在 Apple Silicon 上的经验可用比例）。
+APPLE_UNIFIED_MEMORY_VRAM_RATIO = 0.75
+
+# sysctl 查询超时（秒）
+_SYSCTL_TIMEOUT_SEC = 2.0
+
+
+def _sysctl_value(name: str) -> Optional[str]:
+    """读一个 ``sysctl`` 值；命令不可用 / 平台不对 ⇒ ``None``。"""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        proc = subprocess.run(
+            ["sysctl", "-n", name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=_SYSCTL_TIMEOUT_SEC,
+        )
+    except Exception:  # noqa: BLE001 - 命令不可用时安全回退
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        text = proc.stdout.decode("utf-8", "replace").strip()
+    except Exception:  # pragma: no cover
+        return None
+    return text or None
+
+
+def detect_apple_silicon() -> Dict[str, Any]:
+    """探测本机是否为 Apple Silicon，并折算可用显存。
+
+    返回::
+
+        {
+            "is_apple_silicon": True,
+            "chip": "Apple M2 Pro",
+            "unified_memory_gb": 16.0,
+            "vram_gb": 12.0,          # 统一内存 × 75%
+            "source": "sysctl",       # sysctl / injected / none
+        }
+
+    ⚠️ **温控安全回退**：Mac 无独显 ⇒ **没有** GPU 温度可报
+      （``gpu_temp_c`` 保持 ``None``）—— 云端的过热判定是 fail-open 的，
+      「没报温度」不会被当成「过热」，也不会被当成「有温度」去降级节点。
+    """
+    result: Dict[str, Any] = {
+        "is_apple_silicon": False,
+        "chip": "",
+        "unified_memory_gb": None,
+        "vram_gb": None,
+        "source": "none",
+    }
+
+    # 注入模式（验收 / CI 无 Mac 硬件）：APIPAW_MOCK_APPLE_MEMORY_GB / _CHIP
+    mock_mem = os.getenv("APIPAW_MOCK_APPLE_MEMORY_GB", "").strip()
+    mock_chip = os.getenv("APIPAW_MOCK_APPLE_CHIP", "").strip()
+    if mock_mem:
+        try:
+            memory_gb = float(mock_mem)
+        except ValueError:
+            memory_gb = 0.0
+        if memory_gb > 0:
+            result.update({
+                "is_apple_silicon": True,
+                "chip": mock_chip or "Apple Silicon (mock)",
+                "unified_memory_gb": round(memory_gb, 3),
+                "vram_gb": round(memory_gb * APPLE_UNIFIED_MEMORY_VRAM_RATIO, 3),
+                "source": "injected",
+            })
+            return result
+
+    if platform.system() != "Darwin":
+        return result
+
+    chip = _sysctl_value("machdep.cpu.brand_string") or ""
+    memsize = _sysctl_value("hw.memsize")
+    memory_gb = 0.0
+    if memsize:
+        try:
+            memory_gb = int(memsize) / (1024.0 ** 3)
+        except (TypeError, ValueError):
+            memory_gb = 0.0
+    if memory_gb <= 0:
+        return result
+
+    # Apple Silicon 的 brand_string 形如 "Apple M2 Pro" / "Apple M3 Max"
+    is_apple = bool(chip) and "Apple" in chip
+    result.update({
+        "is_apple_silicon": is_apple,
+        "chip": chip,
+        "unified_memory_gb": round(memory_gb, 3),
+        "vram_gb": round(memory_gb * APPLE_UNIFIED_MEMORY_VRAM_RATIO, 3),
+        "source": "sysctl",
+    })
+    return result
 
 
 def _env_flag_disabled() -> bool:
@@ -225,6 +335,9 @@ def collect_gpu_metrics() -> Dict[str, Optional[float]]:
         "vram_used_gb": None,
         "vram_total_gb": None,
         "vram_free_gb": None,
+        # 阶段二十 P1：Apple Silicon 芯片信息（无独显 Mac）
+        "apple_silicon": False,
+        "chip": "",
     }
 
     # ── 1. nvidia-smi（温度 / 风扇 / 显存，一次调用取全）──
@@ -249,6 +362,19 @@ def collect_gpu_metrics() -> Dict[str, Optional[float]]:
             metrics["vram_free_gb"] = round(free_bytes / (1024**3), 3)
     except Exception:  # noqa: BLE001 - torch 可选
         pass
+
+    # ── 3. macOS Apple Silicon 统一内存（阶段二十 P1）──
+    #    Mac 没有 nvidia-smi 也没有独立显存 ⇒ 统一内存按 75% 折算成"可用显存"，
+    #    否则 Apple Silicon 节点在云端会被判成"显存未知"而**永远进不了**
+    #    高门槛模型的候选池。温度保持 None（无独显 ⇒ 无从测温）。
+    if not metrics.get("vram_total_gb"):
+        apple = detect_apple_silicon()
+        if apple.get("vram_gb"):
+            metrics["vram_total_gb"] = float(apple["vram_gb"])
+            metrics["vram_free_gb"] = float(apple["vram_gb"])
+            metrics["vram_used_gb"] = 0.0
+            metrics["apple_silicon"] = bool(apple.get("is_apple_silicon"))
+            metrics["chip"] = str(apple.get("chip") or "")
 
     return metrics
 
@@ -299,6 +425,14 @@ class TelemetryReporter:
     def __init__(self, endpoint: Optional[str] = None, interval_seconds: Optional[float] = None):
         self._cfg = get_config()
         self._endpoint = endpoint or self._cfg.cloud_heartbeat_url
+        # 阶段二十 P2：多网关主备容灾（心跳通道同样需要 —— WS 挂掉时
+        # 心跳是唯一的兜底通道，此时网关正好坏掉 = 最需要切备的时刻）。
+        self._failover = gateway_failover.GatewayFailover(
+            primary_url=self._endpoint,
+            backup_urls=[gateway_failover.to_heartbeat_url(u)
+                         for u in (getattr(self._cfg, "backup_gateway_urls", []) or [])],
+            threshold=int(getattr(self._cfg, "gateway_failover_threshold", 3) or 3),
+        )
         self._interval = float(interval_seconds or self._cfg.heartbeat_interval_seconds)
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -353,7 +487,49 @@ class TelemetryReporter:
         # 这里补齐：``models``（本地可用清单，空数组 = 确认没有推理引擎）、
         # ``backend_model``（本地引擎 tag）、``inference_backend``（后端类型）。
         payload.update(self._model_payload(cfg))
+        # 阶段二十 P0：局域网 Pipeline Mesh 状态（合体显存 / 分片数 / 层切片表）。
+        # ⚠️ 任何异常都降级成"没组网"—— 心跳绝不能因为 peer 探测失败而失败。
+        try:
+            mesh = mesh_cluster.mesh_status_from_config(cfg)
+        except Exception as exc:  # noqa: BLE001 - 探测失败不影响心跳
+            print("[telemetry] Pipeline Mesh 探测失败（按未组网上报）: %s" % exc)
+            mesh = {}
+        payload.update({
+            "mesh_enabled": bool(mesh.get("mesh_enabled")),
+            "cluster_vram_gb": mesh.get("cluster_vram_gb"),
+            "mesh_shards": mesh.get("mesh_shards"),
+            "mesh_rtt_ms": mesh.get("mesh_rtt_ms"),
+            "mesh_peers_count": mesh.get("mesh_peers_count"),
+            "layer_splits": mesh.get("layer_splits") or [],
+            # 阶段二十 P1：Apple Silicon 芯片信息（Mac 节点）
+            "chip": str(gpu.get("chip") or ""),
+            "apple_silicon": bool(gpu.get("apple_silicon")),
+            # 阶段二十 P2：多网关容灾状态
+            "gateway_status": self._gateway_status_snapshot(),
+        })
         return payload
+
+    def _gateway_status_snapshot(self) -> Dict[str, Any]:
+        """多网关容灾状态快照（缺容灾器时返回空快照，不抛异常）。
+
+        ⚠️ 单测会绕过 ``__init__`` 造实例（``object.__new__``）⇒ 此时没有
+        ``_failover``；缺字段只降级成空快照，绝不让心跳帧崩掉。
+        """
+        failover = getattr(self, "_failover", None)
+        if failover is None:
+            return {
+                "gateway_url": getattr(self, "_endpoint", "") or "",
+                "gateway_index": 0,
+                "gateway_count": 0,
+                "gateway_is_backup": False,
+                "gateways": [],
+            }
+        try:
+            return failover.status()
+        except Exception as exc:  # noqa: BLE001 - 状态快照失败不能拖垮心跳
+            print(f"[telemetry] 读取网关容灾状态失败: {exc}")
+            return {"gateway_url": "", "gateway_index": 0, "gateway_count": 0,
+                    "gateway_is_backup": False, "gateways": []}
 
     @staticmethod
     def _model_payload(cfg: Any) -> Dict[str, Any]:
@@ -418,9 +594,12 @@ class TelemetryReporter:
         if self._cfg.node_secret:
             headers["Authorization"] = f"Bearer {self._cfg.node_secret}"
 
+        failover = getattr(self, "_failover", None)
+        target_url = (getattr(failover, "current_url", "") or self._endpoint) \
+            if failover is not None else self._endpoint
         try:
             resp = self._get_session().post(
-                self._endpoint,
+                target_url,
                 data=data,
                 headers=headers,
                 timeout=(_HTTP_CONNECT_TIMEOUT_SEC, _HTTP_TIMEOUT_SEC),
@@ -428,6 +607,10 @@ class TelemetryReporter:
         except requests.exceptions.RequestException as exc:
             self._failed_count += 1
             self._last_error = str(exc)
+            # 阶段二十 P2：连接失败 ⇒ 计入容灾状态机（达阈值切备机）
+            if failover is not None and failover.record_failure():
+                print("[telemetry] 🔀 心跳网关连续失败，已切换到备用网关: %s"
+                      % failover.current_url)
             return False
         except Exception as exc:  # noqa: BLE001 - 网络异常必须被吞掉
             self._failed_count += 1
@@ -439,11 +622,34 @@ class TelemetryReporter:
             self._consecutive_failures = 0
             self._sent_count += 1
             self._last_sent_at = time.time()
+            # 成功 ⇒ 若跑在备用网关上，主网关恢复则切回
+            if failover is not None and failover.record_success(
+                    primary_probe=self._primary_gateway_reachable):
+                print("[telemetry] 🔁 主网关已恢复，心跳切回主网关")
         else:
             self._failed_count += 1
             self._last_error = f"HTTP {resp.status_code}"
+            # 502/503/504 = 网关层故障 ⇒ 计入容灾；4xx 之类不算
+            if failover is not None and failover.record_failure(status_code=resp.status_code):
+                print("[telemetry] 🔀 心跳网关返回 %s，已切换到备用网关: %s"
+                      % (resp.status_code, failover.current_url))
             print(f"[telemetry] 心跳被拒绝: HTTP {resp.status_code}")
         return ok
+
+    def _primary_gateway_reachable(self) -> bool:
+        """探测主网关是否恢复（TCP 连接即可，廉价）。"""
+        failover = getattr(self, "_failover", None)
+        url = getattr(failover, "_primary", "") or self._endpoint
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if not host:
+                return False
+            with socket.create_connection((host, port), timeout=1.5):
+                return True
+        except Exception:  # noqa: BLE001 - 探测失败 = 主网关还不行
+            return False
 
     def _backoff_seconds(self) -> float:
         """失败退避：10s → 20s → 40s … 上限 60s。"""
@@ -528,6 +734,8 @@ class TelemetryReporter:
             "last_sent_at": self._last_sent_at,
             "running": bool(self._thread and self._thread.is_alive()),
             "channel": "websocket" if _ws_primary_active() else "http",
+            # 阶段二十 P2：多网关容灾状态
+            "gateway": self._gateway_status_snapshot(),
         }
 
 

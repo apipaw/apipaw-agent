@@ -1,4 +1,4 @@
-"""阶段十八 P1 · PoI 签名收据自检（Agent v1.0.17）。
+"""阶段十八 P1 · PoI 签名收据自检（Agent v1.0.17+）。
 
 用法（在仓库根目录执行）：
     ./.venv/Scripts/python.exe test_phase18_p1_receipts.py
@@ -14,7 +14,7 @@
   5. ``ws_tunnel`` 的 ``RESPONSE_DONE`` 帧携带 ``receipt``（真实推理后端路径
      + 本地 API 转发路径）。
   6. HTTP 心跳报文体携带 ``receipt`` 字段。
-  7. Agent 版本 == 1.0.17。
+  7. Agent 版本 >= 1.0.17（阶段二十已升到 1.0.18）。
   8. **真机 ``agent.config.json`` 零污染**（全程字节级比对）。
 
 测试完全离线：不连生产云端，不写本机配置文件。
@@ -383,8 +383,8 @@ def main() -> int:
     import agent_config  # noqa: E402
 
     _record(
-        "AGENT_VERSION == 1.0.17",
-        str(agent_config.AGENT_VERSION) == "1.0.17",
+        "AGENT_VERSION >= 1.0.17",
+        tuple(int(x) for x in str(agent_config.AGENT_VERSION).split(".")) >= (1, 0, 17),
         "version=%r" % agent_config.AGENT_VERSION,
     )
 

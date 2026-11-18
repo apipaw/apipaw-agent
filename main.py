@@ -102,6 +102,55 @@ except ImportError:  # pragma: no cover
 
 
 # ──────────────────────────────────────────────────────────────
+# 阶段二十 · Pipeline Mesh / 多网关容灾的对外快照
+# ──────────────────────────────────────────────────────────────
+def _mesh_status_payload(cfg: Any, force_refresh: bool = False) -> Dict[str, Any]:
+    """Pipeline Mesh 状态快照（任何异常都降级成"没组网"）。"""
+    try:
+        import mesh_cluster
+
+        return mesh_cluster.mesh_status_from_config(
+            cfg, max_age_sec=0.0 if force_refresh else 30.0)
+    except Exception as exc:  # noqa: BLE001 - 面板不能因探测失败而报错
+        print(f"[agent] Pipeline Mesh 探测失败: {exc}")
+        return {
+            "mesh_enabled": False,
+            "cluster_vram_gb": 0.0,
+            "mesh_shards": 0,
+            "mesh_rtt_ms": 0.0,
+            "mesh_peers_count": 0,
+            "layer_splits": [],
+            "peers": [],
+            "rejected_peers": [],
+        }
+
+
+def _gateway_status_payload() -> Dict[str, Any]:
+    """多网关容灾状态快照（WS 隧道为主，心跳为兜底）。"""
+    try:
+        from ws_tunnel import get_ws_tunnel
+
+        tunnel = get_ws_tunnel()
+        if tunnel is not None:
+            status = getattr(tunnel, "_failover", None)
+            if status is not None:
+                return status.status()
+    except Exception as exc:  # noqa: BLE001 - 面板不能因隧道未启动而报错
+        print(f"[agent] 读取网关容灾状态失败: {exc}")
+    try:
+        from telemetry import get_reporter
+
+        reporter = get_reporter()
+        failover = getattr(reporter, "_failover", None)
+        if failover is not None:
+            return failover.status()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"gateway_url": "", "gateway_index": 0, "gateway_count": 0,
+            "gateway_is_backup": False, "gateways": []}
+
+
+# ──────────────────────────────────────────────────────────────
 # OpenAI 规范数据模型
 # ──────────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
@@ -137,6 +186,23 @@ class PrefsRequest(BaseModel):
 
     backend_model: Optional[str] = Field(default=None, max_length=256)
     force_idle: Optional[bool] = None
+
+
+class MeshPrefsRequest(BaseModel):
+    """阶段二十 P0/P2 · Pipeline Mesh 与多网关容灾偏好。
+
+    - ``mesh_peers``：局域网协同节点列表（``host:port``）。
+    - ``mesh_enabled``：是否启用合体。
+    - ``mesh_mode``：分片模式（``Pipeline Shards`` / ``llama.cpp RPC``）。
+    - ``mesh_max_rtt_ms``：合体允许的最大 RTT。
+    - ``backup_gateway_urls``：备用网关地址列表。
+    """
+
+    mesh_peers: Optional[List[str]] = None
+    mesh_enabled: Optional[bool] = None
+    mesh_mode: Optional[str] = Field(default=None, max_length=64)
+    mesh_max_rtt_ms: Optional[float] = Field(default=None, ge=1.0, le=1000.0)
+    backup_gateway_urls: Optional[List[str]] = None
 
 
 class OllamaPullRequest(BaseModel):
@@ -425,6 +491,15 @@ def create_app() -> FastAPI:
             # 阶段十七 P2：GPU 温度 / 风扇转速（None = 本机无独显或不可读）
             "gpu_temp_c": thermals["gpu_temp_c"],
             "gpu_fan_pct": thermals["gpu_fan_pct"],
+            # 阶段二十 P0：Pipeline Mesh 状态（合体显存 / 分片 / 层切片表）
+            "mesh": _mesh_status_payload(cfg),
+            "mesh_peers": list(cfg.mesh_peers),
+            "mesh_enabled": bool(cfg.mesh_enabled),
+            "mesh_mode": str(cfg.mesh_mode or ""),
+            "mesh_max_rtt_ms": float(cfg.mesh_max_rtt_ms or 0.0),
+            # 阶段二十 P2：多网关容灾状态
+            "gateway": _gateway_status_payload(),
+            "backup_gateway_urls": list(cfg.backup_gateway_urls),
             "timestamp": int(time.time()),
         }
 
@@ -486,6 +561,53 @@ def create_app() -> FastAPI:
                     if connected
                     else "配置已保存，正在用新凭证重新连接云端…"
                 ),
+            },
+        )
+
+    # ── 阶段二十 P0/P2 · Pipeline Mesh 与多网关容灾（面板）──
+    @app.get("/api/mesh/status")
+    async def api_mesh_status() -> Dict[str, Any]:
+        """Pipeline Mesh 探测结果（**强制刷新**，不走缓存）。"""
+        return {"ok": True, "mesh": _mesh_status_payload(cfg, force_refresh=True)}
+
+    @app.post("/api/mesh/prefs")
+    async def api_mesh_prefs(req: MeshPrefsRequest) -> JSONResponse:
+        """保存 Pipeline Mesh / 多网关容灾配置（写盘即生效，不必重启）。"""
+        updates: Dict[str, Any] = {}
+        if req.mesh_peers is not None:
+            peers = [str(p).strip() for p in req.mesh_peers if str(p).strip()]
+            updates["mesh_peers"] = peers[:32]
+        if req.mesh_enabled is not None:
+            updates["mesh_enabled"] = bool(req.mesh_enabled)
+        if req.mesh_mode is not None:
+            updates["mesh_mode"] = str(req.mesh_mode).strip()[:64]
+        if req.mesh_max_rtt_ms is not None:
+            updates["mesh_max_rtt_ms"] = float(req.mesh_max_rtt_ms)
+        if req.backup_gateway_urls is not None:
+            backups = [str(u).strip() for u in req.backup_gateway_urls if str(u).strip()]
+            updates["backup_gateway_urls"] = backups[:8]
+
+        if not updates:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "message": "没有需要保存的配置项"},
+            )
+
+        try:
+            cfg.update(**updates)
+        except Exception as exc:  # noqa: BLE001 - 写盘失败必须回显给用户
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "message": f"配置保存失败：{exc}"},
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "mesh": _mesh_status_payload(cfg, force_refresh=True),
+                "gateway": _gateway_status_payload(),
+                "message": "已保存并生效",
             },
         )
 

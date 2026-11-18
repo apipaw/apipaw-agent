@@ -18,8 +18,10 @@ yield_monitor.py — APIPaw 极速让退监视器（50ms SLA）
 
 跨平台
 ------
-Windows 走 Win32 原生实现；macOS / Linux 提供等价降级实现（无输入事件源，
-保持 IDLE），保证本模块在任意平台都能 import，不阻断安装与文档构建。
+Windows 走 Win32 原生实现；macOS 走 ``ioreg -c IOHIDSystem`` 的
+``HIDIdleTime`` 原生实现（阶段二十 P1 · 苹果芯片原生适配），
+Linux 提供等价降级实现（无输入事件源，保持 IDLE），
+保证本模块在任意平台都能 import，不阻断安装与文档构建。
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ import ctypes
 import gc
 import os
 import platform
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -40,6 +44,7 @@ from console import enable_utf8_output
 enable_utf8_output()
 
 IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
 
 # 让退目标：外设活动到状态切换的延迟上限（毫秒）
 DEFAULT_YIELD_SLA_MS = 50
@@ -69,6 +74,131 @@ if IS_WINDOWS:
 else:  # pragma: no cover - 非 Windows 平台
     _user32 = None
     _kernel32 = None
+
+
+# ──────────────────────────────────────────────────────────────
+# macOS 原生空闲探测（阶段二十 P1 · 苹果芯片原生适配）
+# ──────────────────────────────────────────────────────────────
+#
+# Windows 用 ``GetLastInputInfo``（内核 API，亚毫秒级），macOS 没有等价 API，
+# 但 ``ioreg -c IOHIDSystem`` 会吐出 ``"HIDIdleTime" = <纳秒>`` ——
+# 那是系统级的键鼠空闲时长（覆盖全部外设），语义与 GetLastInputInfo 等价。
+#
+# ⚠️ **性能**：`ioreg` 是一次子进程调用（约 5~20ms）。若在 5ms 的轮询里
+#    同步调用它，轮询节拍会被拖垮，50ms 让退 SLA 直接失守。
+#    ⇒ 这里用一个**后台刷新线程**持续采样，轮询线程只读缓存值：
+#    检测延迟上界 = 采样间隔（默认 30ms）+ 轮询节拍，仍在 50ms 预算内。
+
+# HIDIdleTime 的正则（形如 ``"HIDIdleTime" = 1234567890``）
+_MACOS_HID_IDLE_RE = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
+
+# 后台采样间隔（秒）—— 30ms ⇒ 检测延迟上界 < 50ms SLA
+MACOS_IDLE_REFRESH_SEC = 0.03
+
+
+def _parse_macos_idle_seconds(text: str) -> Optional[float]:
+    """从 ``ioreg`` 原始输出里解析 ``HIDIdleTime``（**纳秒 ⇒ 秒**）。
+
+    **纯函数**（不碰子进程）⇒ 可在任意平台上单测解析口径。
+
+    ``ioreg -c IOHIDSystem`` 的输出形如::
+
+        "HIDIdleTime" = 1234567890
+
+    解析不到 / 数字非法 ⇒ 返回 ``None``（= 未知，调用方保持现状）。
+    """
+    if not text:
+        return None
+    match = _MACOS_HID_IDLE_RE.search(text)
+    if not match:
+        return None
+    try:
+        nanoseconds = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return round(nanoseconds / 1_000_000_000.0, 3)
+
+
+def _get_macos_idle_seconds() -> Optional[float]:
+    """读取 macOS 系统级键鼠空闲时长（秒）。
+
+    实现：``ioreg -c IOHIDSystem`` 输出里的 ``"HIDIdleTime"``（**纳秒**）⇒ 秒。
+
+    ⚠️ 命令不可用 / 输出里没有该字段 / 解析失败 ⇒ 返回 ``None``
+      （调用方据此"保持当前状态"，绝不把异常当成"用户正在操作"）。
+
+    本函数是**同步阻塞**的（一次子进程调用）—— 生产路径上由
+    :class:`_MacosIdleProbe` 的后台线程调用，轮询线程只读缓存。
+    """
+    if not IS_MACOS:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ioreg", "-c", "IOHIDSystem"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - 命令不可用时安全回退
+        print("[yield_monitor] ioreg 空闲探测失败: %s" % exc)
+        return None
+    try:
+        text = proc.stdout.decode("utf-8", "replace")
+    except Exception:  # pragma: no cover - 解码失败等价于探测失败
+        return None
+    return _parse_macos_idle_seconds(text)
+
+
+class _MacosIdleProbe:
+    """macOS 空闲探测的后台采样器（缓存 + 刷新线程）。"""
+
+    def __init__(self, interval_sec: float = MACOS_IDLE_REFRESH_SEC) -> None:
+        self._interval = max(0.005, float(interval_sec or MACOS_IDLE_REFRESH_SEC))
+        self._lock = threading.Lock()
+        self._value: Optional[float] = None
+        self._at: float = 0.0
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def refresh(self) -> Optional[float]:
+        """同步采样一次并更新缓存。"""
+        value = _get_macos_idle_seconds()
+        with self._lock:
+            self._value = value
+            self._at = time.time()
+        return value
+
+    def read(self) -> Optional[float]:
+        """读缓存值；缓存为空或过期则同步补采一次。"""
+        with self._lock:
+            value = self._value
+            at = self._at
+        if value is None or (time.time() - at) > (self._interval * 4):
+            return self.refresh()
+        return value
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.refresh()
+            except Exception:  # noqa: BLE001 - 采样线程不允许退出
+                pass
+            self._stop.wait(self._interval)
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop,
+                                        name="MacosIdleProbe", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread = None
+
+
+_macos_idle_probe = _MacosIdleProbe()
 
 
 class NodeState(Enum):
@@ -298,10 +428,18 @@ class YieldMonitor:
 
     def _get_idle_milliseconds(self) -> Optional[int]:
         """
-        返回系统级空闲毫秒数；非 Windows 平台返回 ``None``。
+        返回系统级空闲毫秒数；无法探测的平台返回 ``None``。
 
-        使用 ``GetTickCount64()``（64 位）避免 ``GetTickCount()`` 49.7 天回绕。
+        - **Windows**：``GetLastInputInfo`` + ``GetTickCount64()``
+          （64 位，避免 ``GetTickCount()`` 49.7 天回绕）。
+        - **macOS（阶段二十 P1）**：``ioreg -c IOHIDSystem`` 的 ``HIDIdleTime``，
+          经后台采样器读缓存（不阻塞轮询节拍）。
         """
+        if IS_MACOS:
+            seconds = _macos_idle_probe.read()
+            if seconds is None:
+                return None
+            return int(seconds * 1000)
         if not IS_WINDOWS or _kernel32 is None or _user32 is None:
             return None
         try:
@@ -443,6 +581,9 @@ class YieldMonitor:
             return
         self._enable_timer_precision()
         self._stop_event.clear()
+        # 阶段二十 P1：macOS 上启动空闲采样线程（轮询线程只读缓存）
+        if IS_MACOS:
+            _macos_idle_probe.start()
         # 记录启动时的空闲计数：此后空闲计数被"重置"即说明发生了新的输入事件
         self._start_idle_ms = self._get_idle_milliseconds()
         self._thread = threading.Thread(
@@ -458,6 +599,8 @@ class YieldMonitor:
     def stop(self) -> None:
         """停止监控线程并恢复计时器精度。"""
         self._stop_event.set()
+        if IS_MACOS:
+            _macos_idle_probe.stop()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
@@ -478,6 +621,9 @@ class YieldMonitor:
             "sla_violations": self._sla_violations,
             "poll_interval_ms": self._poll_interval_ms,
             "timer_precision_1ms": self._timer_precision_enabled,
+            # 阶段二十 P1：空闲探测来源（win32 / macos_ioreg / none）
+            "idle_probe": ("macos_ioreg" if IS_MACOS
+                           else ("win32" if IS_WINDOWS else "none")),
             "uptime_seconds": round(time.time() - self._started_at, 1),
         }
 
@@ -512,4 +658,7 @@ __all__ = [
     "get_yield_monitor",
     "is_force_idle_enabled",
     "release_gpu_memory",
+    "_get_macos_idle_seconds",
+    "_parse_macos_idle_seconds",
+    "IS_MACOS",
 ]

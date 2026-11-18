@@ -60,6 +60,14 @@ MESH_PROTOCOL_VERSION = "mesh-v1"
 MESH_MODE_PIPELINE = "Pipeline Shards"
 MESH_MODE_LLAMA_RPC = "llama.cpp RPC"
 
+# v1.0.19：探测对端 /health 时使用的 UA。
+# ⚠️ 不要用 urllib 默认的 Python-urllib/x.y —— 若对端挂在 Cloudflare
+# 之后会被边缘直接拦成 403（真机 Bug C 的同源问题）。
+_PEER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 APIPawAgent/1.0.19"
+)
+
 
 # --------------------------------------------------------------------------
 # 基础工具
@@ -183,7 +191,12 @@ def probe_peer(endpoint: str, timeout_sec: float = 1.0) -> Dict[str, Any]:
         import urllib.request  # 局部导入：非必要依赖不进 import 期
 
         url = "http://%s:%d/health" % (host, port)
-        with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
+        # v1.0.19：带合规 UA —— 对端若也挂在 Cloudflare 后面，
+        # 默认的 Python-urllib UA 会被边缘拦成 403。
+        request = urllib.request.Request(
+            url, headers={"User-Agent": _PEER_USER_AGENT,
+                          "Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=timeout_sec) as resp:
             payload = json.loads(resp.read().decode("utf-8", "replace"))
         gpu = payload.get("gpu") or {}
         vram = _to_float(gpu.get("vram_total_gb"), None)

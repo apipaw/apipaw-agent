@@ -947,7 +947,11 @@ class WebSocketTunnel:
             #   gen_ms  = 首个内容分片 → 生成结束。
             # 云端此前只能用「网关观测到的」TTFT（含网络往返），
             # 现在节点把自测值一并报上去，云端优先用这个。
-            perf_started = time.time()
+            # ⚠️ v1.0.19：用 ``time.perf_counter()``（单调、高分辨率）而不是
+            # ``time.time()`` —— 后者在 Windows 上是 ~15.6ms 的粗钟，
+            # 首字返回快时首尾两次采样会落在同一 tick 里 ⇒ ttft_ms 恒为 0.0，
+            # 既让云端拿不到真实 TTFT，也让单测偶发失败（真机偶发 0ms）。
+            perf_started = time.perf_counter()
             perf_first_at = None
             async for chunk in backend.generate(
                 model,
@@ -958,7 +962,7 @@ class WebSocketTunnel:
             ):
                 if chunk.text:
                     if perf_first_at is None:
-                        perf_first_at = time.time()
+                        perf_first_at = time.perf_counter()
                     sent_chunks += 1
                     output_parts.append(chunk.text)
                     await self._send_json({
@@ -1037,11 +1041,13 @@ class WebSocketTunnel:
             print("[ws_tunnel] 上报真实 token 用量 request_id=%s prompt=%s completion=%s"
                   % (request_id, usage.get("prompt_tokens"), usage.get("completion_tokens")))
         # 阶段六 P3 · 模块 A2：把节点自测的性能读数一并报上去（真实 TTFT 口径）。
-        perf_ended = time.time()
+        perf_ended = time.perf_counter()
         perf: Dict[str, float] = {}
         if perf_first_at is not None:
-            perf["ttft_ms"] = round(max(0.0, (perf_first_at - perf_started) * 1000.0), 2)
-            perf["gen_ms"] = round(max(0.0, (perf_ended - perf_first_at) * 1000.0), 2)
+            # 保留 3 位小数：极快的本地后端首字可能在 1ms 以内，
+            # 两位小数会被四舍五入成 0.0（等于谎报「零延迟」）。
+            perf["ttft_ms"] = round(max(0.0, (perf_first_at - perf_started) * 1000.0), 3)
+            perf["gen_ms"] = round(max(0.0, (perf_ended - perf_first_at) * 1000.0), 3)
         if perf.get("gen_ms", 0.0) > 0 and usage:
             completion_tokens = int(usage.get("completion_tokens") or 0)
             if completion_tokens > 0:

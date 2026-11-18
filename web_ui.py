@@ -42,14 +42,24 @@ UI_HTML = r"""<!DOCTYPE html>
 
   * { box-sizing: border-box; }
 
-  html, body { height: 100%; }
+  /* v1.0.19（真机 Bug A）：页面必须能滚动。
+     旧写法把 html/body 的高度钉死成视口高度，并让 body 垂直居中：
+     卡片总高（阶段十三~二十新增的 Mesh / Ollama / 黄金记忆区块）一旦超过
+     视口高度，flex 居中会把卡片上半部分顶到**视口之外的负坐标**，
+     滚动条拉到最顶也看不见 —— 于是标题、Node ID / Node Secret 输入框和
+     「绑定节点」按钮全部消失，用户以为页面坏了。
+     现在：内容矮时仍水平居中（.wrap 的 margin:auto），内容高时从顶部开始
+     排版并让页面正常滚动，**任何分辨率下打开第一眼就是顶部**。 */
+  html { min-height: 100%; }
 
   body {
     margin: 0;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
-    padding: 32px 20px;
+    padding: 32px 16px;
+    min-height: 100vh;
+    overflow-y: auto;
     background:
       radial-gradient(900px 600px at 15% -10%, rgba(53, 224, 255, 0.14), transparent 60%),
       radial-gradient(800px 520px at 100% 110%, rgba(139, 123, 255, 0.16), transparent 60%),
@@ -76,6 +86,7 @@ UI_HTML = r"""<!DOCTYPE html>
     position: relative;
     width: 100%;
     max-width: 460px;
+    margin: 0 auto;          /* 内容矮时保持水平居中 */
     animation: rise 0.5s ease both;
   }
 
@@ -211,6 +222,38 @@ UI_HTML = r"""<!DOCTYPE html>
   button.primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(53, 224, 255, 0.3); }
   button.primary:active:not(:disabled) { transform: translateY(0); }
   button.primary:disabled { opacity: .55; cursor: progress; }
+
+  /* v1.0.19：URL 预填提示条（真机 Bug B）。
+     位置放在**标题正下方** —— 旧版只把提示写进页面最底部的状态条，
+     而卡片现在很长，用户根本滚不到那条消息。 */
+  .prefill-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+    padding: 12px 14px;
+    border: 1px solid rgba(53, 224, 255, .45);
+    border-radius: 10px;
+    background: rgba(53, 224, 255, .08);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--cyan);
+  }
+
+  .prefill-banner[hidden] { display: none; }
+
+  .prefill-banner .prefill-text { flex: 1 1 190px; min-width: 0; }
+
+  button.primary.small {
+    width: auto;
+    flex: 0 0 auto;
+    margin-top: 0;
+    padding: 9px 14px;
+    font-size: 12px;
+    letter-spacing: .5px;
+  }
 
   .status {
     margin-top: 20px;
@@ -391,6 +434,12 @@ UI_HTML = r"""<!DOCTYPE html>
         保存后会自动写入本地配置并立即重新连接云端，<b>无需重启</b>。
       </p>
 
+      <!-- v1.0.19（真机 Bug B）：URL 预填提示条 + 「立即保存绑定」快捷按钮 -->
+      <div class="prefill-banner" id="prefillBanner" hidden>
+        <span class="prefill-text" id="prefillText">已从链接预填节点凭证。</span>
+        <button type="button" class="primary small" id="prefillBindBtn">立即保存绑定</button>
+      </div>
+
       <div class="field">
         <label for="nodeId">Node ID</label>
         <input id="nodeId" type="text" placeholder="node_default_001" autocomplete="off" spellcheck="false" />
@@ -543,6 +592,9 @@ UI_HTML = r"""<!DOCTYPE html>
   var backupGatewaysEl = $("backupGateways");
   var saveMeshEl = $("saveMesh"), meshSaveStatusEl = $("meshSaveStatus");
   var meshStatusEl = $("meshStatus"), meshSplitsEl = $("meshSplits");
+  // v1.0.19（真机 Bug B）：URL 预填提示条 + 快捷绑定按钮
+  var bannerEl = $("prefillBanner"), prefillTextEl = $("prefillText");
+  var prefillBindBtn = $("prefillBindBtn");
 
   function say(text, kind) {
     statusEl.textContent = text;
@@ -554,11 +606,22 @@ UI_HTML = r"""<!DOCTYPE html>
     connText.textContent = connected ? "云端连接：已连接" : "云端连接：未连接";
   }
 
-  // ── 阶段八 P2：URL 参数预填（?node_id=xxx&node_secret=yyy）──
-  // 控制台「一键新增算力节点」的凭证弹窗会给出这样一条链接，点开即自动填好，
-  // 用户只需点「绑定节点」即可，不必手抄。
-  // ⚠️ 只在**参数存在**时填；已填好的输入框不覆盖（避免轮询/重复打开丢内容）。
+  // ── v1.0.19（真机 Bug B）：URL 参数预填 + 自动绑定 ──
+  // 控制台「一键填入本机 Agent」给出的链接形如：
+  //   http://127.0.0.1:52415/ui?node_id=xxx&node_secret=yyy
+  // 真机反馈的三个问题，本版一并根治：
+  //   ① node_secret 没被填进密码框 —— 旧版只对 node_id 做了提示，
+  //      用户点「绑定节点」才报「请填写 Node Secret」；
+  //   ② 随后的 /api/status 轮询把预填的 node_id 覆盖回旧配置
+  //      （node_default_001）—— 现在用 hasUrlPrefill / userEdited 两个
+  //      标志位**禁止轮询回写**用户正在编辑或刚预填的输入框；
+  //   ③ 用户还得自己去找「绑定节点」按钮（而它可能还被 Bug A 顶出视口）——
+  //      现在两个参数齐备时**自动完成绑定**，并在顶部提示条提供
+  //      「立即保存绑定」快捷按钮兜底。
   // ⚠️ 不把 secret 写进控制台日志、不上报任何遥测（密钥只在本地表单里）。
+  var hasUrlPrefill = false;   // 预填标志：禁止 /api/status 轮询覆盖输入框
+  var userEdited = false;      // 用户手动改过：同样禁止轮询覆盖
+
   (function prefillFromQuery() {
     var params;
     try {
@@ -568,28 +631,51 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     var qid = (params.get("node_id") || "").trim();
     var qsec = (params.get("node_secret") || "").trim();
-    if (qid && !nodeIdEl.value) {
-      nodeIdEl.value = qid;
-      say("已从链接预填 Node ID，点「绑定节点」即可生效。", "ok");
-    }
-    if (qsec && !secretEl.value) {
-      secretEl.value = qsec;
-    }
+    if (!qid && !qsec) { return; }
+
+    // 两个字段**都**填：旧版只填 node_id，导致 secret 仍为空
+    if (qid) { nodeIdEl.value = qid; }
+    if (qsec) { secretEl.value = qsec; }
+    hasUrlPrefill = true;
+
+    // 顶部提示条（放在标题正下方，任何分辨率一眼可见）
+    bannerEl.hidden = false;
+    prefillTextEl.textContent = (qid && qsec)
+      ? ("已从链接预填节点凭证（" + qid + "），点「立即保存绑定」即可完成绑定。")
+      : ("已从链接预填 " + (qid ? "Node ID" : "Node Secret") + "，补齐另一个即可绑定。");
+
     // 顺手清掉地址栏里的明文密钥（避免留在浏览器历史里）
-    if (qid || qsec) {
-      try {
-        var clean = window.location.pathname + window.location.hash;
-        window.history.replaceState({}, document.title, clean);
-      } catch (e) {}
+    try {
+      var clean = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, document.title, clean);
+    } catch (e) {}
+
+    // 顶部优先：确保「标题 + 输入框 + 绑定按钮」落在视口内（配合 Bug A 修复）
+    try { window.scrollTo(0, 0); } catch (e) {}
+
+    // 底部状态条也留一句，方便用户滚到页面下方时仍能看到上下文
+    say("已从链接预填节点凭证。", "ok");
+
+    // 两个参数都齐 ⇒ 直接自动绑定（「点一键填入」即刻完成绑定）
+    if (qid && qsec) {
+      setTimeout(function () { doBind(true); }, 150);
     }
   })();
+
+  // 用户手动改过输入框 ⇒ 轮询一律不得回写
+  nodeIdEl.addEventListener("input", function () { userEdited = true; });
+  secretEl.addEventListener("input", function () { userEdited = true; });
 
   function refresh() {
     return fetch("/api/status", { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (s) {
         setConn(!!s.ws_connected);
-        if (!nodeIdEl.value && s.node_id) { nodeIdEl.value = s.node_id; }
+        // ⚠️ 预填 / 用户编辑过的输入框**绝不**被轮询回写
+        //（真机 Bug B：旧配置 node_default_001 会把刚预填的 node_id 顶掉）
+        if (!hasUrlPrefill && !userEdited && !nodeIdEl.value && s.node_id) {
+          nodeIdEl.value = s.node_id;
+        }
         if (s.agent_version) { $("ver").textContent = "Agent v" + s.agent_version; }
         // 阶段十七 P2：GPU 温度 / 风扇转速（≥75°C 高亮告警，与云端口径一致）
         (function () {
@@ -642,14 +728,16 @@ UI_HTML = r"""<!DOCTYPE html>
     toggleEl.textContent = hidden ? "隐藏" : "显示";
   });
 
-  submitEl.addEventListener("click", function () {
+  // ── 绑定流程（v1.0.19：抽成 doBind，供「绑定节点」按钮与
+  //    预填提示条的「立即保存绑定」按钮、以及 URL 自动绑定共用）──
+  function doBind(auto) {
     var nodeId = (nodeIdEl.value || "").trim();
     var secret = (secretEl.value || "").trim();
     if (!nodeId) { say("请填写 Node ID", "err"); nodeIdEl.focus(); return; }
     if (!secret) { say("请填写 Node Secret", "err"); secretEl.focus(); return; }
 
     submitEl.disabled = true;
-    say("正在保存配置并重新连接云端…", "wait");
+    say(auto ? "已从链接自动绑定中…" : "正在保存配置并重新连接云端…", "wait");
 
     fetch("/api/bind", {
       method: "POST",
@@ -665,6 +753,7 @@ UI_HTML = r"""<!DOCTYPE html>
         if (res.body.connected) {
           say("绑定成功，节点已连上云端 (" + res.body.node_id + ")", "ok");
           secretEl.value = "";
+          bannerEl.hidden = true;
         } else {
           say("配置已保存，正在用新凭证重连云端…（稍候即可生效）", "wait");
         }
@@ -674,7 +763,11 @@ UI_HTML = r"""<!DOCTYPE html>
         say("请求失败：" + e.message, "err");
       })
       .finally(function () { submitEl.disabled = false; });
-  });
+  }
+
+  submitEl.addEventListener("click", function () { doBind(false); });
+  // v1.0.19：预填提示条旁的快捷按钮（顶部，用户不必再往下找「绑定节点」）
+  prefillBindBtn.addEventListener("click", function () { doBind(false); });
 
   // ── 运行偏好（阶段七 P2）：保存即生效 ──
   function sayPrefs(text, kind) {

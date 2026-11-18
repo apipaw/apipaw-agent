@@ -114,7 +114,7 @@ _REPLACE_RETRY_DELAY_SEC = 0.05
 #   · 心跳与 WS 帧新增 ``mesh_enabled`` / ``cluster_vram_gb`` / ``mesh_shards`` /
 #     ``mesh_rtt_ms`` / ``mesh_peers_count`` / ``layer_splits``；
 #   · 新增 ``backup_gateway_urls``（多网关主备）+ ``gateway_failover_threshold``。
-AGENT_VERSION = "1.0.18"
+AGENT_VERSION = "1.0.19"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent

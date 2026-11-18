@@ -221,10 +221,17 @@ def main() -> int:
         payload.get("gpu_temp_c") == 77.0 and payload.get("gpu_fan_pct") == 90.0,
         "temp=%r fan=%r" % (payload.get("gpu_temp_c"), payload.get("gpu_fan_pct")),
     )
+    # ⚠️ v1.0.19：原先这里把版本号**写死**成 1.0.18，每次发版都要改测试
+    #    （很容易忘 ⇒ 发版后 CI 红）。改成「与 agent_config.AGENT_VERSION 一致
+    #    且不低于 1.0.18」，既守住版本下限，又不会因正常发版而误伤。
+    import agent_config as _agent_config_mod  # noqa: E402
+
+    _reported = str(payload.get("agent_version"))
     _record(
-        "Agent 版本已升到 1.0.18",
-        str(payload.get("agent_version")) == "1.0.18",
-        "version=%r" % payload.get("agent_version"),
+        "Agent 版本与 agent_config.AGENT_VERSION 一致（且 ≥ 1.0.18）",
+        _reported == _agent_config_mod.AGENT_VERSION
+        and _reported >= "1.0.18",
+        "version=%r expect=%r" % (_reported, _agent_config_mod.AGENT_VERSION),
     )
 
     # ═══ 7. /api/status 下发温控读数 ═══

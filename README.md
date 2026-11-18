@@ -19,6 +19,10 @@
 
 ## 🚀 What's New | 本次重磅更新
 
+**[EN]** **The local panel finally behaves at 100 % zoom — and "one-click fill" really binds.** Three fixes that came straight from real-machine reports: (1) the page was vertically centred, so once the panel grew past the window height its **top half was pushed off-screen** — the title, the **Node ID / Node Secret** boxes and the **「绑 定 节 点」** button were simply *unreachable*, no matter how far you scrolled. The layout now starts at the top and scrolls properly, so the first thing you see is always the form. (2) The console's "fill this machine" link (`?node_id=…&node_secret=…`) filled in the **ID but not the secret**, and the periodic status poll then wrote the old `node_default_001` back over your input — which is why clicking bind complained *"请填写 Node Secret"*. Now **both** fields are filled, the poll **never overwrites** what you are editing, and a banner with a **「立即保存绑定」** button appears right under the title; when the link carries a complete credential the panel **binds by itself** and wipes the secret from the address bar. (3) The cloud's "recommended models" and "golden memory" panels no longer die with `403 Forbidden` — the agent now sends a proper browser-style **User-Agent** (Cloudflare was blocking the default `Python-urllib` one), uses a **4-second timeout** with automatic retries, and keeps the last good answer in memory so a hiccup no longer empties the panel.
+
+**[CN]** **本地面板在 100% 缩放下终于正常了 —— 「一键填入」也真的能绑上。** 三个来自真机反馈的修复：(1) 页面原本是**垂直居中**排版的，一旦面板高度超过窗口高度，卡片的**上半截就被顶到屏幕之外** —— 标题、**Node ID / Node Secret** 输入框和 **「绑 定 节 点」** 按钮全都**看不见也点不到**，滚到最顶也没用。现在改为从顶部开始排版并允许正常滚动，**打开第一眼永远是表单本身**。(2) 控制台的「一键填入本机 Agent」链接（`?node_id=…&node_secret=…`）以前只填了 **ID、没填密钥**，随后 **5 秒一次的 `/api/status` 轮询**又把旧值 `node_default_001` 写回输入框 —— 于是点「绑定节点」就报 **「请填写 Node Secret」**。现在**两个框都会填好**，轮询**绝不再覆盖**你正在编辑或刚预填的内容，标题下方还会出现一条提示横幅和 **「立即保存绑定」** 快捷按钮；链接里凭证齐全时，面板会**自动完成绑定**并顺手把地址栏里的明文密钥抹掉。(3) 「云端推荐列表」与「黄金记忆」两块面板不再报 `403 Forbidden` —— Agent 现在会带上合规的浏览器 **User-Agent**（此前默认的 `Python-urllib` 被 Cloudflare 边缘拦了），超时收紧到 **4 秒**并自动重试，还会**记住上一次成功的结果**兜底，网络抖动时面板不再整块变空。
+
 **[EN]** **Two small machines in your living room now add up to one big machine.** The new **Pipeline Mesh** probes the other nodes on your local network, measures their round-trip time and asks how much VRAM they have — and only merges with peers that answer (a peer over **25 ms** away, unreachable, or silent about its VRAM is dropped, never guessed at). Two 6 GB nodes therefore present themselves to the cloud as a **12 GB** cluster, and an 80-layer model is split across them as **L0-39 / L40-79**. The cloud uses the **larger** of "this machine's VRAM" and "the cluster's VRAM" when it checks whether your node may serve a demanding model, so a 12 GB model now reaches a pair of 6 GB boxes instead of nobody. Everything is configured in the local panel (**http://127.0.0.1:52415/ui**) under **「🔗 Pipeline Mesh 局域网多机显存合体」**, and the cloud publishes the resulting topology for everyone to see.
 
 **[CN]** **客厅里的两台小机器，现在能当成一台大机器用。** 新增的 **Pipeline Mesh（局域网张量切片合体）** 会探测局域网内的其它节点，测它们的往返延迟、问清楚它们有多少显存 —— 只与**答得上话**的节点合体：往返超过 **25 ms**、连不上、或者**没上报显存**的节点一律剔除，绝不把「未知」当成「有」。于是两台 6GB 节点向云端呈现为 **12GB** 集群，80 层模型被切成 **L0-39 / L40-79** 两片。云端判断「这台机器能不能接大模型」时取**单机显存与集群显存的较大者**，于是 12GB 门槛的模型终于能派到两台 6GB 小机器头上，而不是谁都接不了。全部配置在本地面板（**http://127.0.0.1:52415/ui**）的 **「🔗 Pipeline Mesh 局域网多机显存合体」** 区块里完成，合出来的拓扑会公开公示。
@@ -92,7 +96,7 @@
 ## 🛠️ Quick Start | 傻瓜式安装指南
 
 **[EN] Windows Users:**
-1. Download `APIPaw-Agent-v1.0.18-Windows.zip` from the Assets below and extract it to a folder.
+1. Download `APIPaw-Agent-v1.0.19-Windows.zip` from the Assets below and extract it to a folder.
 2. Double-click `install.bat` to automatically initialize the environment.
    - **In mainland China:** double-click `install_cn.bat` instead — it uses the Tsinghua TUNA pip mirror for much faster downloads.
    - **Overseas:** double-click `install.bat` — it uses the official PyPI index.
@@ -100,7 +104,7 @@
 4. Enter your `Node ID` and `Node Secret` to bind the node. Done!
 
 **[CN] Windows 用户：**
-1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.18-Windows.zip` 并将其解压到一个文件夹。
+1. 下载下方 Assets 中的 `APIPaw-Agent-v1.0.19-Windows.zip` 并将其解压到一个文件夹。
 2. 双击运行安装脚本，等待环境自动初始化完成。
    - **如果您在中国大陆**，请双击运行 `install_cn.bat` 以开启国内网络加速（使用清华 TUNA 镜像源）；海外用户请双击 `install.bat`（使用官方 PyPI 源）。
 3. 双击运行 `start.bat` 启动节点，浏览器将自动弹出 Web UI 绑定面板。
@@ -263,7 +267,7 @@ works.
 
 ---
 
-许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.18/PAWMODEL.md)。
+许可证：MIT License。模型元数据规范见 [`PAWMODEL.md`](https://github.com/apipaw/apipaw-agent/blob/v1.0.19/PAWMODEL.md)。
 
 <!-- QUICKSTART:END -->
 

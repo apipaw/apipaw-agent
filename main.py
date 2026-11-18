@@ -53,7 +53,7 @@ import urllib.request
 import uuid
 import webbrowser
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -61,6 +61,7 @@ from pydantic import BaseModel, Field
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
+import cloud_http
 import inference_backend
 from ollama_local import (
     DEFAULT_OLLAMA_BASE_URL,
@@ -717,16 +718,13 @@ def create_app() -> FastAPI:
             })
         url = base + "/api/v1/network/recommended-models"
 
-        def _fetch() -> Dict[str, Any]:
-            import urllib.request
-            req = urllib.request.Request(
-                url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-            return json.loads(raw)
+        def _fetch() -> Tuple[Dict[str, Any], bool]:
+            # v1.0.19：统一走 cloud_http —— 带合规 UA（否则 Cloudflare 403）、
+            # 4s 短超时（不拖住面板）、失败回落内存缓存。
+            return cloud_http.fetch_cloud_json_cached(url)
 
         try:
-            data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+            data, stale = await asyncio.get_running_loop().run_in_executor(None, _fetch)
         except Exception as exc:  # noqa: BLE001 - 云端不可达不该让面板挂掉
             return JSONResponse(status_code=200, content={
                 "ok": False, "models": [], "count": 0,
@@ -737,7 +735,8 @@ def create_app() -> FastAPI:
             "ok": True,
             "models": items or [],
             "count": len(items or []),
-            "error": "",
+            "stale": bool(stale),
+            "error": ("云端暂时取不到，下面是上次成功取到的内容" if stale else ""),
         })
 
     @app.post("/api/ollama/pull")
@@ -859,22 +858,14 @@ def create_app() -> FastAPI:
             base, urllib.parse.quote(base_model, safe=""))
 
         def _fetch() -> str:
-            request = urllib.request.Request(
-                url, headers={"Accept": "text/plain"})
-            with urllib.request.urlopen(request, timeout=20) as resp:
-                return resp.read().decode("utf-8", "replace")
+            # v1.0.19：走 cloud_http（合规 UA + 退避重试），避免 Cloudflare 403
+            return cloud_http.fetch_cloud_text(
+                url, accept="text/plain", timeout=15.0, retries=2)
 
         def _fetch_summary() -> Dict[str, Any]:
-            request = urllib.request.Request(
-                base + "/api/v1/network/golden-summary",
-                headers={"Accept": "application/json"})
-            with urllib.request.urlopen(request, timeout=10) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-            try:
-                obj = json.loads(raw)
-            except ValueError:
-                return {}
-            return obj if isinstance(obj, dict) else {}
+            data, _stale = cloud_http.fetch_cloud_json_cached(
+                base + "/api/v1/network/golden-summary")
+            return data
 
         try:
             modelfile_text = await asyncio.get_running_loop().run_in_executor(None, _fetch)
@@ -935,17 +926,13 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=200, content={
                 "ok": False, "golden_count": 0, "error": "未配置云端地址"})
 
-        def _fetch() -> Dict[str, Any]:
-            request = urllib.request.Request(
-                base + "/api/v1/network/golden-summary",
-                headers={"Accept": "application/json"})
-            with urllib.request.urlopen(request, timeout=10) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-            obj = json.loads(raw)
-            return obj if isinstance(obj, dict) else {}
+        def _fetch() -> Tuple[Dict[str, Any], bool]:
+            # v1.0.19：统一走 cloud_http（合规 UA + 4s 短超时 + 缓存兜底）
+            return cloud_http.fetch_cloud_json_cached(
+                base + "/api/v1/network/golden-summary")
 
         try:
-            data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+            data, stale = await asyncio.get_running_loop().run_in_executor(None, _fetch)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse(status_code=200, content={
                 "ok": False, "golden_count": 0, "error": str(exc)})
@@ -954,7 +941,8 @@ def create_app() -> FastAPI:
             "golden_count": int(data.get("golden_count") or 0),
             "pool_total": int(data.get("pool_total") or 0),
             "latest": data.get("latest") or [],
-            "error": ""})
+            "stale": bool(stale),
+            "error": ("云端暂时取不到，下面是上次成功取到的内容" if stale else "")})
 
     return app
 

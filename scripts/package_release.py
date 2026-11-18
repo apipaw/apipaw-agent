@@ -72,6 +72,9 @@ RUNTIME_MODULES: Tuple[str, ...] = (
     # —— telemetry / ws_tunnel 必依赖这两个模块，漏了直接 import 失败
     "mesh_cluster.py",
     "gateway_failover.py",
+    # v1.0.19（真机 Bug A/B/C）：云端 HTTP 统一出口（合规 UA + 短超时 + 重试 + 缓存）
+    # —— main 必依赖它，漏了直接 import 失败
+    "cloud_http.py",
 )
 
 # 一键脚本：Windows 用户主要用这三个
@@ -310,7 +313,8 @@ def smoke_test(zip_path: Path, version: str) -> None:
         probe = (
             "import sys; sys.path.insert(0, %r); "
             "import main, agent_config, web_ui, ws_tunnel, telemetry, "
-            "token_counter, tray_icon, yield_monitor, console; "
+            "token_counter, tray_icon, yield_monitor, console, "
+            "cloud_http, mesh_cluster, gateway_failover; "
             "print('import ok', agent_config.AGENT_VERSION)"
         ) % (str(root),)
         proc = subprocess.run(

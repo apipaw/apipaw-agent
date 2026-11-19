@@ -104,8 +104,13 @@ def main():
     again = dispatch_crypto.decrypt_model(
         dispatch_crypto.encrypt_model(model_id, secret), secret)
     _record("加解密往返一致", again == model_id, again)
+    # 篡改必须**真的改掉字节**：旧写法固定替换成 "00"，当密文末字节恰好
+    # 就是 0x00 时替换成了「原值」（实测约 0.65% 概率）⇒ 密文没变、
+    # 摘要校验自然通过 ⇒ 用例假红。这里保证替换值与原值不同。
+    _tail = cipher[-2:]
+    _tampered = cipher[:-2] + ("11" if _tail != "11" else "22")
     try:
-        dispatch_crypto.decrypt_model(cipher[:-2] + "00", secret)
+        dispatch_crypto.decrypt_model(_tampered, secret)
         _record("篡改密文被检出", False, "竟然解开了")
     except ValueError as exc:
         _record("篡改密文被检出", True, str(exc)[:50])

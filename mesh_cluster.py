@@ -65,7 +65,7 @@ MESH_MODE_LLAMA_RPC = "llama.cpp RPC"
 # 之后会被边缘直接拦成 403（真机 Bug C 的同源问题）。
 _PEER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 APIPawAgent/1.0.19"
+    "AppleWebKit/537.36 APIPawAgent/1.0.20"
 )
 
 

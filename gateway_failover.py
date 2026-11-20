@@ -22,15 +22,110 @@ gateway_failover.py — 阶段二十 P2 · 多网关主备自动容灾
 --------
 * :class:`GatewayFailover` —— 主备状态机
 * :func:`normalize_gateway_list` —— 规整网关列表（去重、保序）
+* :func:`validate_backup_gateway_urls` —— 阶段二十二 P1 · 备用网关**可信性校验**
 """
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import urlsplit
 
 # 触发故障转移的 HTTP 状态码（网关层错误）
 FAILOVER_STATUS_CODES = (502, 503, 504)
+
+# --------------------------------------------------------------------------
+# 阶段二十二 P1 · 备用网关白名单
+# --------------------------------------------------------------------------
+# 为什么必须收紧（审计 §5A.2 第 12 条）：
+#   ``backup_gateway_urls`` 是**面板可写**的配置项（``/api/mesh/prefs``），
+#   而节点会把 **Node Secret** 通过 WS 握手发给「网关地址」。
+#   一旦这个地址可被改成 ``ws://evil.example.com``，节点就会**主动把
+#   节点凭证送到攻击者手里** —— 攻击者拿它就能冒充本节点接单、骗取分账。
+#
+#   所以：
+#   1. 协议只允许 **wss:// / https://**（明文 ws://http:// 一律拒绝）；
+#   2. 域名必须在**信任域白名单**内（默认 ``*.apipaw.com``，
+#      可用环境变量 ``APIPAW_TRUSTED_GATEWAY_DOMAINS`` 追加）。
+DEFAULT_TRUSTED_GATEWAY_DOMAINS = ("apipaw.com",)
+#: 允许的协议（其余一律拒绝）
+TRUSTED_GATEWAY_SCHEMES = ("wss://", "https://")
+#: 信任域扩展的环境变量名
+TRUSTED_GATEWAY_DOMAINS_ENV = "APIPAW_TRUSTED_GATEWAY_DOMAINS"
+
+
+def trusted_gateway_domains() -> List[str]:
+    """当前生效的**信任域白名单**（小写、去点号、去重）。
+
+    默认只有 ``apipaw.com``；用 ``APIPAW_TRUSTED_GATEWAY_DOMAINS``
+    以英文逗号追加（例如 ``example.com,lab.internal``）。
+    """
+    domains: List[str] = []
+    for raw in list(DEFAULT_TRUSTED_GATEWAY_DOMAINS) + [
+        str(os.environ.get(TRUSTED_GATEWAY_DOMAINS_ENV) or "").split(",")
+    ]:
+        for item in (raw if isinstance(raw, (list, tuple)) else [raw]):
+            text = str(item or "").strip().lower().lstrip(".")
+            if text and text not in domains:
+                domains.append(text)
+    return domains
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    """主机名是否命中信任域（含 ``*.domain`` 通配）。"""
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def is_trusted_gateway_url(url: str,
+                           domains: Optional[Sequence[str]] = None) -> bool:
+    """单个网关地址是否**可信**。
+
+    判定口径：
+      - 协议必须是 ``wss://`` 或 ``https://``；
+      - 主机名必须命中信任域白名单（精确匹配或子域通配）。
+    """
+    text = str(url or "").strip()
+    if not text:
+        return False
+    if not text.lower().startswith(TRUSTED_GATEWAY_SCHEMES):
+        return False
+    try:
+        host = (urlsplit(text).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    allow = list(domains) if domains is not None else trusted_gateway_domains()
+    return any(_host_matches(host, str(d or "").lower().lstrip("."))
+               for d in allow)
+
+
+def validate_backup_gateway_urls(urls: Optional[Sequence[str]],
+                                 domains: Optional[Sequence[str]] = None
+                                 ) -> List[str]:
+    """过滤备用网关列表：**只保留可信地址**（去重保序）。
+
+    - 非字符串 / 空串 ⇒ 丢弃；
+    - 协议不是 ``wss://`` / ``https://`` ⇒ 丢弃；
+    - 主机不在信任域白名单 ⇒ 丢弃；
+    - 重复项只保留第一次出现的。
+    """
+    allow = list(domains) if domains is not None else trusted_gateway_domains()
+    kept: List[str] = []
+    for raw in list(urls or []):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if not is_trusted_gateway_url(text, allow):
+            continue
+        if text in kept:
+            continue
+        kept.append(text)
+    return kept
+
 
 
 def normalize_gateway_list(primary: str, backups: Optional[Sequence[str]] = None) -> List[str]:
@@ -195,8 +290,14 @@ class GatewayFailover:
 
 __all__ = [
     "FAILOVER_STATUS_CODES",
+    "DEFAULT_TRUSTED_GATEWAY_DOMAINS",
+    "TRUSTED_GATEWAY_SCHEMES",
+    "TRUSTED_GATEWAY_DOMAINS_ENV",
     "GatewayFailover",
+    "is_trusted_gateway_url",
     "normalize_gateway_list",
-    "to_ws_url",
     "to_heartbeat_url",
+    "to_ws_url",
+    "trusted_gateway_domains",
+    "validate_backup_gateway_urls",
 ]

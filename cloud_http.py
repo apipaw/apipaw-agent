@@ -53,12 +53,12 @@ from typing import Any, Callable, Dict, Optional, Tuple
 #: 明显自动化标识硬拦），追加 APIPawAgent 版本号便于服务端排障。
 CLOUD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 APIPawAgent/1.0.19"
+    "AppleWebKit/537.36 APIPawAgent/1.0.20"
 )
 
 #: 客户端标识头（与 UA 分开，便于服务端按版本做灰度与排障）
 CLIENT_HEADER_NAME = "X-APIPaw-Client"
-CLIENT_HEADER_VALUE = "APIPawAgent/1.0.19"
+CLIENT_HEADER_VALUE = "APIPawAgent/1.0.20"
 
 #: 面板类请求的超时（秒）。**短超时是硬要求**：宁可这一块显示「暂时取不到」，
 #: 也不能让本机面板的其它接口（/api/status、/api/ollama/tags）跟着卡。

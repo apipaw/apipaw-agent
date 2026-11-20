@@ -75,6 +75,8 @@ RUNTIME_MODULES: Tuple[str, ...] = (
     # v1.0.19（真机 Bug A/B/C）：云端 HTTP 统一出口（合规 UA + 短超时 + 重试 + 缓存）
     # —— main 必依赖它，漏了直接 import 失败
     "cloud_http.py",
+    # v1.0.20（阶段二十二 P1）：本地面板 Host / Origin 双闸门 —— main 必依赖它
+    "local_guard.py",
 )
 
 # 一键脚本：Windows 用户主要用这三个
@@ -314,7 +316,7 @@ def smoke_test(zip_path: Path, version: str) -> None:
             "import sys; sys.path.insert(0, %r); "
             "import main, agent_config, web_ui, ws_tunnel, telemetry, "
             "token_counter, tray_icon, yield_monitor, console, "
-            "cloud_http, mesh_cluster, gateway_failover; "
+            "cloud_http, mesh_cluster, gateway_failover, local_guard; "
             "print('import ok', agent_config.AGENT_VERSION)"
         ) % (str(root),)
         proc = subprocess.run(

@@ -58,11 +58,14 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from agent_config import AGENT_VERSION, get_config
 from console import enable_utf8_output
 import cloud_http
+import gateway_failover
 import inference_backend
+import local_guard
 from ollama_local import (
     DEFAULT_OLLAMA_BASE_URL,
     OllamaError,
@@ -283,6 +286,37 @@ def create_app() -> FastAPI:
         description="APIPaw 挂机节点本地推理网关（OpenAI 规范接口）",
         lifespan=lifespan,
     )
+
+    # ── 阶段二十二 P1 · Host 闸门（防 DNS Rebinding）────────────────
+    # 只监听回环地址**不等于**只有本人能访问：攻击者把 evil.com 的 DNS
+    # 指向 127.0.0.1，浏览器就会向本机发请求，而浏览器只按**域名**判同源。
+    # ⇒ 只认 127.0.0.1 / localhost 的 Host 头（其余一律 400）。
+    _allowed_hosts = local_guard.allowed_hosts(
+        getattr(cfg, "host", "") or "", getattr(cfg, "port", 0) or 0)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+    _allowed_origins = local_guard.allowed_origins(
+        getattr(cfg, "host", "") or "", getattr(cfg, "port", 0) or 0)
+
+    def _guard_local_write(request: Request) -> Optional[JSONResponse]:
+        """写端点的 Origin 闸门（返回 None 表示放行）。
+
+        覆盖 ``/api/bind``、``/api/prefs``、``/api/mesh/prefs``、
+        ``/api/ollama/pull|bind|evolve`` —— 这些端点能改**节点归属**
+        与**备用网关地址**，被 CSRF 拿下等于把节点凭证送人。
+        """
+        path = str(request.url.path or "")
+        if path not in local_guard.LOCAL_WRITE_PATHS:
+            return None
+        ok, reason = local_guard.check_request_origin(
+            dict(request.headers), _allowed_origins)
+        if ok:
+            return None
+        print("[main] 拒绝非本地面板来源的写请求: %s（%s）" % (path, reason))
+        return JSONResponse(
+            status_code=403,
+            content={"ok": False, "code": reason,
+                     "message": "请求来源不被信任（本地面板只接受来自本机的请求）"},
+        )
 
     # ── /health ──
     @app.get("/health")
@@ -506,7 +540,7 @@ def create_app() -> FastAPI:
 
     # ── /api/bind ── 绑定凭证：写盘 + 刷新内存 + 隧道平滑重连 ──
     @app.post("/api/bind")
-    async def api_bind(req: BindRequest) -> JSONResponse:
+    async def api_bind(req: BindRequest, request: Request) -> JSONResponse:
         """
         保存 Node ID / Node Secret 并让节点立刻用新凭证连接云端。
 
@@ -518,6 +552,11 @@ def create_app() -> FastAPI:
         """
         node_id = (req.node_id or "").strip()
         node_secret = (req.node_secret or "").strip()
+
+        # ⓪ 来源闸门（阶段二十二 P1）：只接受本地面板发起的绑定
+        denied = _guard_local_write(request)
+        if denied is not None:
+            return denied
 
         # ① 校验
         if not node_id:
@@ -572,8 +611,12 @@ def create_app() -> FastAPI:
         return {"ok": True, "mesh": _mesh_status_payload(cfg, force_refresh=True)}
 
     @app.post("/api/mesh/prefs")
-    async def api_mesh_prefs(req: MeshPrefsRequest) -> JSONResponse:
+    async def api_mesh_prefs(req: MeshPrefsRequest, request: Request) -> JSONResponse:
         """保存 Pipeline Mesh / 多网关容灾配置（写盘即生效，不必重启）。"""
+        denied = _guard_local_write(request)
+        if denied is not None:
+            return denied
+
         updates: Dict[str, Any] = {}
         if req.mesh_peers is not None:
             peers = [str(p).strip() for p in req.mesh_peers if str(p).strip()]
@@ -586,6 +629,22 @@ def create_app() -> FastAPI:
             updates["mesh_max_rtt_ms"] = float(req.mesh_max_rtt_ms)
         if req.backup_gateway_urls is not None:
             backups = [str(u).strip() for u in req.backup_gateway_urls if str(u).strip()]
+            # ⚠️ 阶段二十二 P1：备用网关地址必须过**可信域白名单**
+            #    （只允许 wss:// / https:// + *.apipaw.com 等信任域）。
+            #    节点会把 Node Secret 发给「网关地址」⇒ 地址可被改 = 凭证外泄。
+            rejected = [u for u in backups
+                        if not gateway_failover.is_trusted_gateway_url(u)]
+            if rejected:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "ok": False,
+                        "code": "untrusted_gateway_url",
+                        "message": ("以下网关地址不被信任（只允许 wss:// / https:// "
+                                    "且域名在信任域白名单内）：%s"
+                                    % "、".join(rejected[:4])),
+                    },
+                )
             updates["backup_gateway_urls"] = backups[:8]
 
         if not updates:
@@ -614,7 +673,7 @@ def create_app() -> FastAPI:
 
     # ── /api/prefs ── 运行偏好：本地推理模型 + 强制待命（阶段七 P2）──
     @app.post("/api/prefs")
-    async def api_prefs(req: PrefsRequest) -> JSONResponse:
+    async def api_prefs(req: PrefsRequest, request: Request) -> JSONResponse:
         """保存运行偏好并**立即生效**（不必重启、不必改 start.bat）。
 
         - ``backend_model``：本地推理模型 tag；改了之后重置推理后端缓存，
@@ -622,6 +681,10 @@ def create_app() -> FastAPI:
         - ``force_idle``：强制待命模式；``yield_monitor`` 每次判定都重读配置，
           因此勾上后**下一次状态轮询**就生效。
         """
+        denied = _guard_local_write(request)
+        if denied is not None:
+            return denied
+
         updates: Dict[str, Any] = {}
         if req.backend_model is not None:
             updates["backend_model"] = str(req.backend_model).strip()
@@ -740,7 +803,7 @@ def create_app() -> FastAPI:
         })
 
     @app.post("/api/ollama/pull")
-    async def api_ollama_pull(req: OllamaPullRequest) -> JSONResponse:
+    async def api_ollama_pull(req: OllamaPullRequest, request: Request) -> JSONResponse:
         """**免命令行**拉取本机模型（阶段十三 P2）。
 
         流程：校验模型名 → 后台线程调本机 Ollama ``/api/pull`` →
@@ -749,6 +812,9 @@ def create_app() -> FastAPI:
         ⚠️ 拉取是**后台线程**：几百 MB 的下载绝不能占住事件循环，否则
         本机 ``/health`` 会被拖死、面板会超时。
         """
+        denied = _guard_local_write(request)
+        if denied is not None:
+            return denied
         try:
             model = validate_model_name(req.model)
         except ValueError as exc:
@@ -787,8 +853,11 @@ def create_app() -> FastAPI:
             "pull": pull_manager.status()})
 
     @app.post("/api/ollama/bind")
-    async def api_ollama_bind(req: OllamaBindRequest) -> JSONResponse:
+    async def api_ollama_bind(req: OllamaBindRequest, request: Request) -> JSONResponse:
         """把**本机已装**的模型设为当前接单模型（不下载，立刻生效）。"""
+        denied = _guard_local_write(request)
+        if denied is not None:
+            return denied
         try:
             model = validate_model_name(req.model)
         except ValueError as exc:
@@ -820,7 +889,7 @@ def create_app() -> FastAPI:
 
     # ── 阶段十五 P2：云端黄金记忆 ⇒ 本机一键合成进化模型 ──────────────
     @app.post("/api/ollama/evolve")
-    async def api_ollama_evolve(req: OllamaEvolveRequest) -> JSONResponse:
+    async def api_ollama_evolve(req: OllamaEvolveRequest, request: Request) -> JSONResponse:
         """**一键合成进化模型**（阶段十五 P2 · 终极闭环的本地半边）。
 
         流程：
@@ -834,6 +903,9 @@ def create_app() -> FastAPI:
         ⚠️ 本机 Ollama 没起来 ⇒ 回 **200 + ``ok:false`` + 人话提示**
         （不是 500）—— 面板要能直接把这句话显示给用户。
         """
+        denied = _guard_local_write(request)
+        if denied is not None:
+            return denied
         base = str(cfg.cloud_api_base or "").rstrip("/")
         if not base:
             return JSONResponse(status_code=200, content={

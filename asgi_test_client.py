@@ -84,7 +84,7 @@ class TestClient(object):
     - 响应对象提供 ``status_code`` / ``json()`` / ``text`` / ``content`` / ``headers``
     """
 
-    def __init__(self, app: Any, base_url: str = "http://testserver") -> None:
+    def __init__(self, app: Any, base_url: str = "http://127.0.0.1") -> None:
         self.app = app
         self.base_url = base_url.rstrip("/")
 
@@ -100,7 +100,10 @@ class TestClient(object):
             query = ("%s&%s" % (query, extra)) if query else extra
 
         body = b""
-        raw_headers: Dict[str, str] = {"host": "testserver"}
+        # ⚠️ 阶段二十二 P1：Host 头用 **127.0.0.1**（不是 "testserver"）。
+        #    Agent 现在挂了 ``TrustedHostMiddleware``（只认 127.0.0.1/localhost），
+        #    否则**所有**本地单测都会被 Host 闸门打成 400。
+        raw_headers: Dict[str, str] = {"host": "127.0.0.1"}
         if json is not None:
             body = _json.dumps(json, ensure_ascii=False).encode("utf-8")
             raw_headers["content-type"] = "application/json"
@@ -119,7 +122,7 @@ class TestClient(object):
             "query_string": query.encode("utf-8"),
             "root_path": "",
             "scheme": "http",
-            "server": ("testserver", 80),
+            "server": ("127.0.0.1", 80),
             "client": ("testclient", 50000),
             "headers": [(k.encode("latin-1"), v.encode("latin-1"))
                         for k, v in raw_headers.items()],

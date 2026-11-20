@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from console import enable_utf8_output
+from gateway_failover import validate_backup_gateway_urls
 
 enable_utf8_output()
 
@@ -114,7 +115,14 @@ _REPLACE_RETRY_DELAY_SEC = 0.05
 #   · 心跳与 WS 帧新增 ``mesh_enabled`` / ``cluster_vram_gb`` / ``mesh_shards`` /
 #     ``mesh_rtt_ms`` / ``mesh_peers_count`` / ``layer_splits``；
 #   · 新增 ``backup_gateway_urls``（多网关主备）+ ``gateway_failover_threshold``。
-AGENT_VERSION = "1.0.19"
+#
+# v1.0.20（阶段二十二 P1 · 本地面板纵深加固）——
+#   · ``TrustedHostMiddleware``：只认 127.0.0.1 / localhost 的 Host 头（防 DNS Rebinding）；
+#   · 写端点（/api/bind、/api/prefs、/api/mesh/prefs、/api/ollama/*）加 Origin 闸门；
+#   · 取消「URL 带参 ⇒ 自动绑定」（钓鱼链接可静默改节点归属）；
+#   · ``backup_gateway_urls`` 收敛到 **wss:// / https:// + 信任域白名单**
+#     （节点会把 Node Secret 发给网关地址 ⇒ 地址可改 = 凭证外泄）。
+AGENT_VERSION = "1.0.20"
 
 # 配置文件默认存放位置：项目根目录（与本文件同级）
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -598,10 +606,18 @@ class AgentConfig:
     # ── 阶段二十 P2 · 多网关容灾 ─────────────────────────
     @property
     def backup_gateway_urls(self) -> List[str]:
+        """备用网关地址列表（**阶段二十二 P1：已过可信域白名单**）。
+
+        ⚠️ 这里过滤**不是**可选的洁癖：节点会把 Node Secret 通过 WS 握手
+        发给「网关地址」，所以地址可被篡改 ⇒ 凭证外泄 ⇒ 节点被冒用接单。
+        即便有人手工改 ``agent.config.json``，这一层也会把它挡掉。
+        """
         value = getattr(self._model, "backup_gateway_urls", []) or []
         if isinstance(value, str):
-            return [p.strip() for p in value.split(",") if p.strip()]
-        return [str(p).strip() for p in value if str(p).strip()]
+            raw = [p.strip() for p in value.split(",") if p.strip()]
+        else:
+            raw = [str(p).strip() for p in value if str(p).strip()]
+        return validate_backup_gateway_urls(raw)
 
     @property
     def gateway_failover_threshold(self) -> int:

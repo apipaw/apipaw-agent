@@ -4,7 +4,7 @@ scripts/sync_docs.py — 中英双语指南的全端同步器
 背景
 ----
 v1.0.4 之前，中英双语使用指南分散在三处手写：README、GitHub Release 正文、
-发行包内的《使用说明.md》。三处各改各的，结果 ZIP 停留在旧版文案——
+发行包内的《USAGE.md》。三处各改各的，结果 ZIP 停留在旧版文案——
 这就是发布事故的根源。
 
 本脚本把 ``docs/quickstart.md`` 确立为**唯一真源**，并把它的渲染结果
@@ -13,7 +13,7 @@ v1.0.4 之前，中英双语使用指南分散在三处手写：README、GitHub 
     docs/quickstart.md
         │
         ├─► README.md         （注入 <!-- QUICKSTART:BEGIN --> 标记区）
-        ├─► ZIP 内《使用说明.md》（package_release.py 调用 render_template）
+        ├─► ZIP 内《USAGE.md》（package_release.py 调用 render_template）
         └─► GitHub Release 正文（--push-release，按需上传）
 
 模板里用 ``{{VERSION}}`` / ``{{ZIP_NAME}}`` 两个占位符，渲染时替换成
@@ -160,7 +160,7 @@ def check_readme(version: str) -> bool:
 
 
 def check_zip(version: str, zip_path: Path) -> bool:
-    """校验发行包内的《使用说明.md》是否与模板一致。"""
+    """校验发行包内的《USAGE.md》是否与模板一致。"""
     if not zip_path.is_file():
         print(f"[FAIL] 发行包不存在：{zip_path}")
         return False

@@ -12,7 +12,7 @@ scripts/package_release.py — 构建 Windows 发行版 zip
         ├── start_silent.vbs     # 后台静默启动（适合开机自启）
         ├── main.py / web_ui.py / ...
         ├── requirements.txt
-        ├── 使用说明.md           # 小白向极简说明（不是仓库那篇长 README）
+        ├── USAGE.md              # 小白向极简说明（不是仓库那篇长 README）
         └── LICENSE
 
 设计取舍
@@ -22,7 +22,11 @@ scripts/package_release.py — 构建 Windows 发行版 zip
 - **排除开发资产**：测试代码、探针、CI 脚本、.git、虚拟环境、
   以及含 node_secret 的 agent.config.json 一律不进包。
 - **不放仓库的 README.md**：那篇是给开发者看的（含协议、架构、
-  内网细节），对新用户是噪音；包内另放一份《使用说明.md》。
+  内网细节），对新用户是噪音；包内另放一份《USAGE.md》。
+- **包内文件名一律 ASCII**：Windows 资源管理器按 OEM 代码页（国内为
+  GBK）解码 zip 条目名，非 ASCII 文件名会被解成乱码（实测「使用说明.md」
+  在中文 Windows 上落盘成乱码名，UTF-8 标志位形同虚设）。
+  因此说明文档固定叫 ``USAGE.md``，内容仍是中文。
 - **保留 LICENSE**：MIT 协议要求随分发附带许可证。
 - **批处理脚本保持 CRLF**：cmd.exe 解析 LF-only 的 .bat 会出现
   "was unexpected at this time"。脚本统一按 CRLF 重新落盘。
@@ -110,8 +114,8 @@ CRLF_FILES: Tuple[str, ...] = (
 # 包内用户说明的模板来源（单一真源，与 README / Release 正文同源）
 QUICKSTART_TEMPLATE = REPO_ROOT / "docs" / "quickstart.md"
 
-# 包内用户说明的文件名
-QUICKSTART_NAME = "使用说明.md"
+# 包内用户说明的文件名（必须纯 ASCII：中文 Windows 解压会乱码，见文件头「设计取舍」）
+QUICKSTART_NAME = "USAGE.md"
 
 # 发行包文件名规则
 ZIP_NAME_PREFIX = "APIPaw-Agent-"
@@ -128,7 +132,7 @@ def render_quickstart(version: str) -> str:
     渲染双语指南模板（**全端唯一真源**）。
 
     内容来自 ``docs/quickstart.md``——它同时是 README 标记区、发行包内
-    《使用说明.md》、GitHub Release 正文的来源。改文案只改这一个文件，
+    《USAGE.md》、GitHub Release 正文的来源。改文案只改这一个文件，
     其余各端由 ``scripts/sync_docs.py`` 统一分发，杜绝多处手写漂移。
     """
     if not QUICKSTART_TEMPLATE.is_file():
@@ -238,6 +242,11 @@ def build_zip(version: str, out_dir: Path) -> Path:
 
     files = collect_files()
     verify_no_secrets(files)
+
+    # 包内条目名必须纯 ASCII：中文 Windows 资源管理器按 OEM 代码页解码
+    # zip 条目名，非 ASCII 名会落盘成乱码（历史事故：「使用说明.md」）。
+    if not QUICKSTART_NAME.isascii():
+        raise SystemExit(f"[FATAL] 包内文件名必须是纯 ASCII：{QUICKSTART_NAME!r}")
 
     # 已有同名产物先删掉，避免 zip 追加旧内容
     if zip_path.exists():

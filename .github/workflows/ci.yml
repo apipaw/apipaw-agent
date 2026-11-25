@@ -1,83 +1,156 @@
 name: APIPaw Agent CI
 
+# 阶段二十三 P0 · 把 Agent 仓的 **19 个 test_*.py** 真正跑进 CI。
+#
+# 之前的问题（2026-11-20 审计 §"CI 没跑单测"）：
+#   本仓库有 18 个 ``test_*.py``，但旧 ci.yml **一个都没跑** ——
+#   只有 compileall、import 自检和两个自写冒烟脚本。
+#   ⇒ "本地 18/18 全绿"从来没有在 CI 里被复现过，回归靠人盯。
+#
+# 本流水线的作业矩阵：
+#   * `windows-latest`  → 跑**全部** test_*.py（Windows 是主交付平台）
+#   * `macos-latest`    → compileall + import + **真机** macOS/Apple Silicon
+#                         运行时用例（ioreg HIDIdleTime / sysctl 统一内存）
+#   * `release-package` → 校验发行包可构建 + **包内文件名纯 ASCII**
+#                         （历史事故：中文文件名在中文 Windows 解压成乱码）
+
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: apipaw-agent-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONDONTWRITEBYTECODE: "1"
+
 jobs:
-  build-test:
+  # ------------------------------------------------------------------
+  # Windows 全量单测
+  # ------------------------------------------------------------------
+  test-windows:
+    name: Test (windows-latest, all test_*.py)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # 完整依赖：包含托盘（pystray + Pillow）、WebSocket 主通道与可选推理栈
-          - name: full
-            python: "3.10"
-            deps: "fastapi uvicorn requests websockets pystray pillow pydantic"
-          # 降级场景：故意不装 pystray / pillow / websockets，验证依赖缺失时仍可启动与心跳
-          - name: minimal
-            python: "3.10"
-            deps: "fastapi uvicorn pydantic"
-
-    defaults:
-      run:
-        shell: bash
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python }}
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.12"
 
-      - name: Install dependencies (${{ matrix.name }})
-        run: |
-          python -m pip install --upgrade pip
-          pip install ${{ matrix.deps }}
-
-      - name: Code Compile Check
-        run: |
-          python -m compileall -q -x '(\.venv|\\build|\\dist)' .
-
-      - name: Import Self-check
-        run: |
-          python -c "import main, agent_config, yield_monitor, telemetry, tray_icon, ws_tunnel; print('Self-check passed')"
-
-      - name: Health API Verification
-        run: |
-          python .github/scripts/health_check.py
-
-      - name: Yield Monitor Smoke Test
-        run: |
-          python .github/scripts/yield_smoke_test.py
-
-  # 多 Python 版本兼容性矩阵
-  matrix-python:
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: [ "3.10", "3.12" ]
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install fastapi uvicorn pydantic
-      - name: Compile + Import Check
+          pip install fastapi uvicorn requests websockets pystray pillow "pydantic>=2,<3"
+
+      - name: Code Compile Check
+        run: python -m compileall -q -x '(\.venv|\\build|\\dist|__pycache__)' .
+
+      - name: Import Self-check
         run: |
-          python -m compileall -q -x '(\.venv|\\build|\\dist)' .
-          python -c "import main, agent_config, yield_monitor, telemetry; print('ok')"
+          python -c "import main, agent_config, yield_monitor, telemetry, tray_icon, ws_tunnel, local_guard, gateway_failover, mesh_cluster, cloud_http; print('Self-check passed')"
+
+      - name: Health API Verification
+        run: python .github/scripts/health_check.py
+
+      - name: Yield Monitor Smoke Test
+        run: python .github/scripts/yield_smoke_test.py
+
+      - name: All unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          status=0
+          count=0
+          for f in $(ls test_*.py | sort); do
+            count=$((count + 1))
+            echo "::group::$f"
+            if ! python "$f"; then
+              echo "::error::$f failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          echo "共执行 $count 个测试文件"
+          if [ "$count" -lt 19 ]; then
+            echo "::error::测试文件数异常（$count < 19）—— 新增用例可能没被纳入 CI"
+            status=1
+          fi
+          exit $status
+
+  # ------------------------------------------------------------------
+  # macOS / Apple Silicon 真机运行时
+  # ------------------------------------------------------------------
+  test-macos:
+    name: Test (macos-latest, macOS runtime)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn requests websockets pystray pillow "pydantic>=2,<3"
+
+      - name: Code Compile Check
+        run: python -m compileall -q -x '(\.venv|/build|/dist|__pycache__)' .
+
+      - name: Import Self-check (Darwin branches)
+        run: |
+          python -c "import main, agent_config, yield_monitor, telemetry, ws_tunnel, local_guard; print('macOS import ok')"
+
+      - name: macOS / Apple Silicon runtime tests
+        run: python test_phase23_macos.py
+
+      - name: Mesh / failover tests
+        run: python test_phase20_p0_mesh_federation.py
+
+  # ------------------------------------------------------------------
+  # 发行包可构建 + 包内文件名纯 ASCII
+  # ------------------------------------------------------------------
+  release-package:
+    name: Release package (ASCII filenames)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build release package
+        run: python scripts/package_release.py --version 1.0.20
+
+      - name: Assert package filenames are ASCII
+        shell: bash
+        run: |
+          python - <<'PY'
+          import zipfile, glob, sys
+          zips = sorted(glob.glob("dist/APIPaw-Agent-*-Windows.zip"))
+          if not zips:
+              sys.exit("[FATAL] 没有生成任何发行包")
+          bad = []
+          for zp in zips:
+              with zipfile.ZipFile(zp) as z:
+                  for name in z.namelist():
+                      if not name.isascii():
+                          bad.append((zp, name))
+              print("[ok] %s 条目全部 ASCII" % zp)
+          if bad:
+              sys.exit("[FATAL] 发行包内存在非 ASCII 文件名（中文 Windows 会解成乱码）: %s" % bad)
+          PY

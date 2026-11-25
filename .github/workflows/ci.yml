@@ -133,6 +133,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # package_release.py 会把发行包解出来做一次 **import 自检**
+      # （main / web_ui / ws_tunnel …）⇒ 运行期依赖必须先装好。
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn requests websockets pystray pillow "pydantic>=2,<3"
+
       - name: Build release package
         run: python scripts/package_release.py --version 1.0.20
 

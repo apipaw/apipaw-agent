@@ -43,6 +43,8 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from agent_config import AGENT_VERSION
+
 # 探测结果缓存（心跳 30s 一轮，不该每轮都去连一遍 peer）
 _MESH_STATUS_CACHE: Dict[str, Any] = {"at": 0.0, "value": None}
 _MESH_STATUS_LOCK = threading.Lock()
@@ -63,9 +65,11 @@ MESH_MODE_LLAMA_RPC = "llama.cpp RPC"
 # v1.0.19：探测对端 /health 时使用的 UA。
 # ⚠️ 不要用 urllib 默认的 Python-urllib/x.y —— 若对端挂在 Cloudflare
 # 之后会被边缘直接拦成 403（真机 Bug C 的同源问题）。
+# ⚠️ 阶段二十六 P1（R-10）：版本号取 ``agent_config.AGENT_VERSION``（单一真源），
+#    不再硬编码 —— 硬编码过一次就漂移过一次。
 _PEER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 APIPawAgent/1.0.20"
+    "AppleWebKit/537.36 APIPawAgent/%s" % AGENT_VERSION
 )
 
 

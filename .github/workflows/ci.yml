@@ -140,8 +140,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install fastapi uvicorn requests websockets pystray pillow "pydantic>=2,<3"
 
+      # ⚠️ 阶段二十六 P1（R-10）：版本号**不再在 CI 里硬编码** ——
+      #    `package_release.py` 不传版本参数时本就取 `agent_config.AGENT_VERSION`
+      #    （单一真源）。过去这里写死了一个具体版本号，于是每次发版都可能
+      #    与代码里的真源不一致（1.0.11 vs 1.0.20 的漂移就是这么来的）。
       - name: Build release package
-        run: python scripts/package_release.py --version 1.0.20
+        run: python scripts/package_release.py
 
       - name: Assert package filenames are ASCII
         shell: bash

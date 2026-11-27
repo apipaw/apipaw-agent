@@ -49,16 +49,20 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from agent_config import AGENT_VERSION
+
 #: 合规 UA —— 以 Mozilla/5.0 开头（Cloudflare 只对「默认 Python UA」这种
 #: 明显自动化标识硬拦），追加 APIPawAgent 版本号便于服务端排障。
+# ⚠️ 阶段二十六 P1（R-10）：版本号**不再硬编码**，一律取 ``agent_config.AGENT_VERSION``
+#    —— 版本单一真源。硬编码过一次就漂移过一次（1.0.11 vs 1.0.20）。
 CLOUD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 APIPawAgent/1.0.20"
+    "AppleWebKit/537.36 APIPawAgent/%s" % AGENT_VERSION
 )
 
 #: 客户端标识头（与 UA 分开，便于服务端按版本做灰度与排障）
 CLIENT_HEADER_NAME = "X-APIPaw-Client"
-CLIENT_HEADER_VALUE = "APIPawAgent/1.0.20"
+CLIENT_HEADER_VALUE = "APIPawAgent/%s" % AGENT_VERSION
 
 #: 面板类请求的超时（秒）。**短超时是硬要求**：宁可这一块显示「暂时取不到」，
 #: 也不能让本机面板的其它接口（/api/status、/api/ollama/tags）跟着卡。
